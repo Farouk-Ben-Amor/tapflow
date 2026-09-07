@@ -456,6 +456,21 @@ func pulseIsDue(unpublished: Bool, now: Double, lastWrite: Double, enforcing: Bo
  * Measured: the first candidate works. `/tmp` has **not** been exercised, because the loop returns on
  * the first success and never reaches it.
  *
+ * **`/tmp` is world-writable, and what makes it safe is on the reader's side, not here** (#734).
+ * Anyone on the Mac can drop a fresh `tapflow-netfilter-state.json` there naming any device, and the
+ * agent would otherwise read it as this provider's own publication — an "offline" control drawn over
+ * a simulator whose traffic is flowing. `readIfProviderWrote` in
+ * `packages/ios-agent/src/SimulatorNetwork.ts` is what refuses it: in a directory anyone but its
+ * owner can write to, a file is believed only when root owns it and nobody else can change it,
+ * judged through the descriptor that is then read and opened `O_NOFOLLOW` so a symlink cannot
+ * redirect the check.
+ *
+ * **Dropping `/tmp` was the other answer and it was not taken.** #734 weighed it: an unwritable
+ * protected directory would then be a hard failure, and the agent reads a missing file as "not
+ * enforcing" — so the kernel would go on dropping traffic while the control said the filter was
+ * gone, which is the state this whole file exists to make impossible. The fallback stays and the
+ * reader carries the check.
+ *
  * **This list exists three times and nothing compiles all three** — here, `FILTER_STATE_FILES` in
  * `packages/ios-agent/src/SimulatorNetwork.ts`, and again in `packages/cli/src/lib/net-filter.ts`.
  * A Swift test can pin this copy and no more, so the cross-language half is a node check in
