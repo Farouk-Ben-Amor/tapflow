@@ -46,7 +46,10 @@ run () {
   # same hole this file already closed once, reached through a different door.
   : > "$LOG"
   xcodegen generate --spec tests.yml >/dev/null || return 1
+  # `-derivedDataPath` only under `--mutate`, where it keeps the copy's build products inside the
+  # copy. A plain run stays on Xcode's default path so it is incremental across invocations.
   xcodebuild test -project "$PROJ" -scheme FilterLogicTests -destination 'platform=macOS,arch=arm64' \
+    ${MUTATE_DERIVED:+-derivedDataPath "$MUTATE_DERIVED"} \
     CODE_SIGNING_ALLOWED=NO > "$LOG" 2>&1
 }
 
@@ -54,6 +57,32 @@ if [[ "${1:-}" != "--mutate" ]]; then
   if run; then grep -E "Executed .* tests|TEST SUCCEEDED" "$LOG" | tail -2; exit 0
   else grep -E "error:|Test Case.*failed|TEST FAILED" "$LOG" | head -20; exit 1; fi
 fi
+
+# **`--mutate` works on a COPY, and the checkout is never written to.**
+#
+# It used to mutate `Extension/FlowIdentity.swift` and `Host/RuleArguments.swift` in place and restore
+# them after each of the seventy runs. That leaves a window open for the length of the whole mode —
+# about thirteen minutes — and anything else touching the tree during it sees a deliberately broken
+# source. Measured, three times in one day: `build.sh` started while this was running, and a mutated
+# extension was compiled, signed, notarized and recorded in `shipped.json`. Nothing about the run
+# said it was happening; `git status` was clean between mutations and dirty inside them.
+#
+# Being careful was tried and did not work. Copying does: there is no window, so a build racing this
+# is no longer a thing that can go wrong, and `git status` stays clean throughout.
+#
+# `mktemp -d` rather than a fixed name, because `rsync --delete` into a path something else can
+# pre-create is a path it can point somewhere worth deleting. The cost is that `xcodebuild` starts
+# cold once per run — DerivedData is pinned inside the copy so nothing accumulates under
+# `~/Library` — which buys back the whole failure mode above.
+WORK=$(mktemp -d -t tapflow-netfilter-mutate) || exit 1
+# **The second `trap … EXIT` below REPLACES this one**, which is why `cleanup` removes `$WORK` as well.
+# Getting that wrong left a 3.7 GB copy behind on the first run of this mode — bash keeps one EXIT
+# handler, not a list, and nothing says so at the point of the second `trap`.
+trap 'rm -rf "$WORK"' EXIT
+/usr/bin/rsync -a --exclude build --exclude 'DerivedData' --exclude '*.xcodeproj' ./ "$WORK/"
+echo "=== mutating a copy at $WORK — this checkout is not written to ==="
+cd "$WORK"
+export MUTATE_DERIVED="$WORK/DerivedData"
 
 echo "=== baseline (must PASS) ==="
 run && echo "  PASS" || { echo "  FAIL — fix the tests before mutating"; grep -E "error:" "$LOG" | head; exit 1; }
@@ -64,15 +93,16 @@ run && echo "  PASS" || { echo "  FAIL — fix the tests before mutating"; grep 
 EXT_SRC=Extension/FlowIdentity.swift
 HOST_SRC=Host/RuleArguments.swift
 
-# **`mktemp`, not a fixed path.** The interesting half is not the backup but the restore: a name
-# anything else on the machine can pre-create is a name it can replace, and `restore` writes whatever
-# is there back into a source file that gets built into a signed system extension.
+# **Still `mktemp`, and still restored between mutations** — each one has to start from the pristine
+# source or the second would compound the first. What changed is the stake: these paths are inside the
+# copy above, so a bad restore corrupts a directory that is deleted on exit rather than a source file
+# that gets built into a signed system extension.
 EXT_ORIG=$(mktemp -t FlowIdentity.orig) || exit 1
 HOST_ORIG=$(mktemp -t RuleArguments.orig) || exit 1
 cp "$EXT_SRC" "$EXT_ORIG"
 cp "$HOST_SRC" "$HOST_ORIG"
 restore () { cp "$EXT_ORIG" "$EXT_SRC"; cp "$HOST_ORIG" "$HOST_SRC"; }
-cleanup () { restore; rm -f "$EXT_ORIG" "$HOST_ORIG"; }
+cleanup () { restore; rm -f "$EXT_ORIG" "$HOST_ORIG"; rm -rf "${WORK:-}"; }
 trap cleanup EXIT
 
 # The backup a given source is compared against, so `DID NOT APPLY` stays honest per file.
