@@ -252,6 +252,26 @@ final class HeartbeatStateTests: XCTestCase {
     /// `FILTER_STATE_FILES` in `packages/ios-agent/src/SimulatorNetwork.ts` and again in
     /// `packages/cli/src/lib/net-filter.ts` — and a Swift test cannot read either. The cross-language
     /// half is `scripts/__tests__/netfilterStatePaths.test.mjs`, which reads all three.
+    ///
+    /// **`/tmp` is world-writable, and what makes it safe is on the reader's side** (#734). Anyone on
+    /// the Mac can drop a fresh `tapflow-netfilter-state.json` there naming any device, and the agent
+    /// would otherwise read it as the provider's own publication — an "offline" control drawn over a
+    /// simulator whose traffic is flowing. `readIfProviderWrote` in `SimulatorNetwork.ts` refuses it:
+    /// in a directory anyone but its owner can write to, a file is believed only when root owns it
+    /// and nobody else can change it, judged through the descriptor that is then read and opened
+    /// `O_NOFOLLOW` so a symlink cannot redirect the check.
+    ///
+    /// **Dropping `/tmp` was the other answer #734 weighed, and it was declined.** An unwritable
+    /// protected directory would become a hard failure, and the agent reads a missing state file as
+    /// *not enforcing* — so the kernel would go on dropping that simulator's traffic while the
+    /// control said the filter was gone, which is the state this whole mechanism exists to prevent,
+    /// reached from the other side. CodeRabbit asked for the removal on #761 and this is the answer.
+    ///
+    /// **It is written here rather than beside the list**, which is where it belongs, because
+    /// everything under `Extension/` is an input to the extension's version stamp: a comment there
+    /// costs a notarized rebuild and leaves one more displaced extension pending until the Mac
+    /// reboots. `Tests/` is not an input. That is a trade, not a preference — if `Extension/` is
+    /// being rebuilt for a real change anyway, this paragraph should move next to the array.
     func testTheCandidatesAreTheTwoTheAgentAlsoLooksIn() {
         XCTAssertEqual(stateFileCandidates,
                        ["/Library/Application Support/tapflow", "/tmp"])
