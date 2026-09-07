@@ -71,7 +71,10 @@ mutate "loop: v6 loopback ignored"  's|if (IN6_IS_ADDR_LOOPBACK(&v6->sin6_addr))
 mutate "loop: v4-mapped ignored"    's|if (IN6_IS_ADDR_V4MAPPED(&v6->sin6_addr)) {|if (0) {|'  || fails=1
 mutate "loop: mapped reads the wrong octets" 's|s6_addr\[12\]|s6_addr[8]|'                     || fails=1
 mutate "loop: everything is loopback" 's|^  return 0;$|  return 1;|'                           || fails=1
-mutate "loop: family ignored"       's|if (addr->sa_family == AF_INET) {|if (1) {|'            || fails=1
+mutate "loop: v4 family ignored"    's|if (addr->sa_family == AF_INET) {|if (1) {|'            || fails=1
+# **This one survived the first version of the suite.** Every family case fed an all-zero body, and a
+# zeroed body answers 0 with or without the guard. The payload cases are what made it observable.
+mutate "loop: v6 family ignored"    's|if (addr->sa_family == AF_INET6) {|if (1) {|'           || fails=1
 
 # tf_blocking_decision — the install gate is the one that outranks everything
 mutate "block: partial install blocks" 's|if (!hooksLive) return 0;||'                         || fails=1

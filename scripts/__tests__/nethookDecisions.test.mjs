@@ -81,6 +81,18 @@ describe('which peers survive a cut', () => {
     expect(Number(ask('loopback-family', 1)), 'AF_UNIX').toBe(0)
     expect(Number(ask('loopback-family', 0)), 'AF_UNSPEC').toBe(0)
   })
+
+  // **The family guard, and an all-zero body cannot see it.** With the body zeroed both branches
+  // answer 0 whether or not the `AF_INET6` check runs, so the case above passes over a version that
+  // has no guard at all — a review measured exactly that mutation surviving all 34 tests. These carry
+  // a loopback-shaped body under a family that is not v6, which is the input that separates them.
+  it.each([
+    ['::1', 'a v6 loopback body'],
+    ['::ffff:127.0.0.1', 'a mapped v4 loopback body'],
+  ])('a non-v6 family carrying %s is still not loopback (%s)', (payload) => {
+    expect(Number(ask('loopback-family', 1, payload)), 'AF_UNIX').toBe(0)
+    expect(Number(ask('loopback-family', 17, payload)), 'AF_INET-adjacent family').toBe(0)
+  })
 })
 
 describe('whether a call is refused', () => {

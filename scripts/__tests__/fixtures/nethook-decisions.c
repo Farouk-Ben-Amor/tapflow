@@ -49,10 +49,17 @@ int main(int argc, char **argv) {
   /* A socket that is neither v4 nor v6 — a unix domain peer, which `getpeername` can return for a
    * descriptor the scan reached. It must not read as loopback and must not read as external either;
    * the caller's contract is only that it is not cut. */
-  if (strcmp(what, "loopback-family") == 0 && argc == 3) {
-    struct sockaddr_storage a;
+  if (strcmp(what, "loopback-family") == 0 && (argc == 3 || argc == 4)) {
+    /* Shaped as a `sockaddr_in6` so an optional payload lands exactly where the v6 branch would read
+     * it. An all-zero body answers the same with or without the family guard, which is how a test
+     * built only from those reads as covering a branch it cannot see. */
+    struct sockaddr_in6 a;
     memset(&a, 0, sizeof a);
-    a.ss_family = (sa_family_t)atoi(argv[2]);
+    a.sin6_family = (sa_family_t)atoi(argv[2]);
+    if (argc == 4 && inet_pton(AF_INET6, argv[3], &a.sin6_addr) != 1) {
+      fprintf(stderr, "bad v6 payload: %s\n", argv[3]);
+      return 2;
+    }
     printf("%d\n", tf_peer_is_loopback_decision((const struct sockaddr *)&a));
     return 0;
   }

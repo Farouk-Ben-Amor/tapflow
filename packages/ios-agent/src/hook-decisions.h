@@ -92,8 +92,9 @@ static inline int tf_should_activate_decision(const char *udid, const char *targ
  *
  * **This string is a contract with the agent, in another language.** `SimulatorNetwork.ts` writes
  * `${conditionDir}/tapflow-offline-${udid}` with `conditionDir` defaulting to `/tmp`; this reads it.
- * Nothing compiles both, so `scripts/__tests__/nethookConditionPath.test.mjs` compares them — a drift
+ * Nothing compiles both, so `scripts/__tests__/nethookDecisions.test.mjs` compares them — a drift
  * makes the toggle do nothing at all, silently, with the control still saying offline.
+
  *
  * Returns the number of characters that would have been written, `snprintf`-style, so a caller can
  * tell a truncated path from a complete one.

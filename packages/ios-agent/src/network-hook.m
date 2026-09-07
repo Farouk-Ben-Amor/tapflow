@@ -115,13 +115,33 @@ static const char *tf_udid(void) {
  * verdict, the self-check and the watcher below need no second case.
  */
 static BOOL tf_should_activate(void) {
-  // The three reads are here; the decision is `tf_should_activate_decision`, where a test can reach
-  // it. A `nil` bundle identifier arrives as a NULL `UTF8String`, which that function refuses — which
-  // is the "default is off" the block above describes.
+  /**
+   * **The two cheap reads come first, and that ordering is the point rather than style.** This runs
+   * in a `constructor` in **every** process the simulator starts — SpringBoard, backboardd, every
+   * daemon — and all but one of them fail here. Reading `NSBundle.mainBundle` parses the main
+   * executable's `Info.plist`, so doing it before the environment is checked would put that cost on
+   * every process on the device for an answer that is `NO`. The first version of this refactor did
+   * exactly that, by making the bundle id an argument.
+   *
+   * The decision function repeats these two guards. That is deliberate: it stays total so a test can
+   * reach every branch, while the ordering that saves the work lives where the work is.
+   */
+  const char *udid = tf_udid();
+  if (udid == NULL) return NO;
+  const char *target = getenv("TAPFLOW_TARGET_BUNDLE");
+  if (target == NULL || *target == '\0') return NO;
+
   NSString *me = NSBundle.mainBundle.bundleIdentifier;
-  return tf_should_activate_decision(tf_udid(), getenv("TAPFLOW_TARGET_BUNDLE"), me.UTF8String)
-             ? YES : NO;
+  const char *bytes = me.UTF8String;
+  // **An embedded NUL would make `strcmp` agree where `NSString` did not.** `CFBundleIdentifier` is
+  // read from a binary plist, which can carry one; `com.x\0z` compares equal to `com.x` byte-wise and
+  // would activate the hooks in an app nobody named. Refused here rather than in the decision, which
+  // takes a C string and cannot see past the terminator.
+  if (bytes != NULL && strlen(bytes) != [me lengthOfBytesUsingEncoding:NSUTF8StringEncoding]) return NO;
+
+  return tf_should_activate_decision(udid, target, bytes) ? YES : NO;
 }
+
 
 
 // ── the condition file ───────────────────────────────────────────────────────
@@ -177,12 +197,19 @@ static atomic_bool g_forced_offline = ATOMIC_VAR_INIT(false);
 static atomic_bool g_hooks_live = ATOMIC_VAR_INIT(false);
 
 static BOOL tf_blocking(void) {
-  // The orderings stay here — acquire on the install gate, relaxed on the flag — because they are a
-  // property of these loads rather than of the decision they feed. A partially installed set never
-  // blocks anything; see `g_hooks_live`.
-  return tf_blocking_decision(atomic_load_explicit(&g_hooks_live, memory_order_acquire),
-                              atomic_load_explicit(&g_forced_offline, memory_order_relaxed),
-                              tf_offline()) ? YES : NO;
+  // **Both short circuits are preserved here, and they are about cost rather than about the answer.**
+  // `tf_offline()` stats the condition file on every hooked call; the install gate and the forced
+  // flag each existed to not pay for it. Handing all three to the decision as plain arguments would
+  // evaluate the stat unconditionally — including in a process where the install failed and the
+  // replacements are live but neutered, which is the one place it buys nothing at all.
+  //
+  // The orderings stay here too: acquire on the install gate, relaxed on the flag, because they are
+  // a property of these loads rather than of the decision they feed.
+  const int live = atomic_load_explicit(&g_hooks_live, memory_order_acquire);
+  const int forced = live ? atomic_load_explicit(&g_forced_offline, memory_order_relaxed) : 0;
+  const int file = (live && !forced) ? tf_offline() : 0;
+  return tf_blocking_decision(live, forced, file) ? YES : NO;
+
 
 }
 
