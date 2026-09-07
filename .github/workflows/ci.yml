@@ -52,6 +52,16 @@ jobs:
 
       - run: pnpm test
 
+      # **The injected library's decisions, mutated.** Several of those cases assert that something is
+      # *not* loopback, *not* blocking, *not* activated, and a test asserting absence passes when
+      # nothing happens. Sixteen seconds on this runner — it compiles a header with `cc` and needs no
+      # simulator SDK, which is the whole reason these tests are here rather than on `test-swift`.
+      #
+      # Only on one leg of the matrix: the mutations judge C, and nothing about them varies with the
+      # Node version.
+      - if: matrix.node == 24
+        run: packages/ios-agent/mutate-nethook.sh
+
   # **The Swift the job above cannot touch — named for the language, not for today's one suite.**
   #
   # Swift is spread across this repo (`ios-netfilter`, `xctest-runner`, `netprobe`, the helper

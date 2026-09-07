@@ -35,6 +35,11 @@
 #import <stdlib.h>
 #import <sys/resource.h>
 #import <sys/socket.h>
+
+// The decidable half, in plain C so a test can compile it with no simulator SDK. See the note at the
+// top of that file for what is in it and why it is a header rather than a `.c`.
+#include "hook-decisions.h"
+
 #import <os/log.h>
 #import <stdatomic.h>
 #import <stdio.h>
@@ -85,12 +90,6 @@ static os_log_t tf_log(void) {
  * **The default is off.** With no target named, or no bundle identifier to compare, this returns
  * false: a bug in the identification leaves the simulator unhooked rather than hooking the system.
  */
-static BOOL tf_is_target_app(void) {
-  const char *target = getenv("TAPFLOW_TARGET_BUNDLE");
-  if (target == NULL || *target == '\0') return NO;
-  NSString *me = NSBundle.mainBundle.bundleIdentifier;
-  return me != nil && [me isEqualToString:@(target)];
-}
 
 /**
  * The simulator this process belongs to, or `NULL`.
@@ -116,10 +115,14 @@ static const char *tf_udid(void) {
  * verdict, the self-check and the watcher below need no second case.
  */
 static BOOL tf_should_activate(void) {
-  // Before anything else: no udid means no per-simulator namespace, and this library has no other.
-  if (tf_udid() == NULL) return NO;
-  return tf_is_target_app();
+  // The three reads are here; the decision is `tf_should_activate_decision`, where a test can reach
+  // it. A `nil` bundle identifier arrives as a NULL `UTF8String`, which that function refuses — which
+  // is the "default is off" the block above describes.
+  NSString *me = NSBundle.mainBundle.bundleIdentifier;
+  return tf_should_activate_decision(tf_udid(), getenv("TAPFLOW_TARGET_BUNDLE"), me.UTF8String)
+             ? YES : NO;
 }
+
 
 // ── the condition file ───────────────────────────────────────────────────────
 
@@ -137,7 +140,8 @@ static const char *tf_condition_path(void) {
   dispatch_once(&once, ^{
     // `tf_should_activate` has already refused a process with no udid, so this cannot be NULL by
     // the time anything calls it.
-    snprintf(path, sizeof(path), "/tmp/tapflow-offline-%s", tf_udid());
+    tf_condition_path_decision(path, sizeof(path), tf_udid());
+
   });
   return path;
 }
@@ -173,9 +177,13 @@ static atomic_bool g_forced_offline = ATOMIC_VAR_INIT(false);
 static atomic_bool g_hooks_live = ATOMIC_VAR_INIT(false);
 
 static BOOL tf_blocking(void) {
-  // A partially installed set never blocks anything. See `g_hooks_live`.
-  if (!atomic_load_explicit(&g_hooks_live, memory_order_acquire)) return NO;
-  return atomic_load_explicit(&g_forced_offline, memory_order_relaxed) || tf_offline();
+  // The orderings stay here — acquire on the install gate, relaxed on the flag — because they are a
+  // property of these loads rather than of the decision they feed. A partially installed set never
+  // blocks anything; see `g_hooks_live`.
+  return tf_blocking_decision(atomic_load_explicit(&g_hooks_live, memory_order_acquire),
+                              atomic_load_explicit(&g_forced_offline, memory_order_relaxed),
+                              tf_offline()) ? YES : NO;
+
 }
 
 // ── the name lookup ──────────────────────────────────────────────────────────
@@ -383,21 +391,9 @@ static void tf_push_path_update(void) {
  * sees the connection go away, which is what a phone losing signal looks like.
  */
 static BOOL tf_peer_is_loopback(const struct sockaddr *addr) {
-  if (addr->sa_family == AF_INET) {
-    const struct sockaddr_in *v4 = (const struct sockaddr_in *)addr;
-    return (ntohl(v4->sin_addr.s_addr) >> 24) == 127;
-  }
-  if (addr->sa_family == AF_INET6) {
-    const struct sockaddr_in6 *v6 = (const struct sockaddr_in6 *)addr;
-    if (IN6_IS_ADDR_LOOPBACK(&v6->sin6_addr)) return YES;
-    // ::ffff:127.0.0.0/8 — a v4 loopback reached through a v6 socket, which is what a dual-stack
-    // resolver hands back for `localhost` here.
-    if (IN6_IS_ADDR_V4MAPPED(&v6->sin6_addr)) {
-      return (ntohl(*(const uint32_t *)&v6->sin6_addr.s6_addr[12]) >> 24) == 127;
-    }
-  }
-  return NO;
+  return tf_peer_is_loopback_decision(addr) ? YES : NO;
 }
+
 
 /**
  * The descriptors are walked with plain POSIX rather than `libproc`, which the simulator SDK does not
