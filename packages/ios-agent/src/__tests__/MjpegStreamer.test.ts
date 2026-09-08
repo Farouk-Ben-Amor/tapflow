@@ -66,6 +66,20 @@ describe('MjpegStreamer', () => {
     expect(simctl.screenshot).toHaveBeenCalledTimes(1)
   })
 
+  it('surfaces a capture failure to the reader instead of stalling it', async () => {
+    // The `catch` arm of the capture had no test: replacing `controller.error(err)` with `void err`
+    // left all eight tests across this file and the perf one green. A reader waiting on a stream
+    // nobody errors waits forever, and a screenshot rejecting mid-stream is what a simulator being
+    // shut down under a live session looks like.
+    vi.useFakeTimers()
+    const screenshot = vi.fn().mockRejectedValue(new Error('simulator went away'))
+    const streamer = new MjpegStreamer({ screenshot }, 'dev-1', 100)
+
+    const reader = streamer.start().getReader()
+
+    await expect(reader.read()).rejects.toThrow('simulator went away')
+  })
+
   it('skips a capture if the previous one is still in progress', async () => {
     vi.useFakeTimers()
     let resolve!: () => void
