@@ -1,5 +1,5 @@
 import { execFileSync } from 'child_process'
-import { appendFileSync, chmodSync, chownSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
+import { appendFileSync, chmodSync, chownSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -935,6 +935,78 @@ describe('SimulatorNetwork', () => {
       })
       nothingApplied()
     })
+
+    // **Root only, and the reason is the guard's own shape rather than convenience.** `O_NOFOLLOW`
+    // changes the answer in exactly one case: when the file the link points at would otherwise be
+    // believed. That means root-owned and not group- or world-writable — and a test running as a
+    // normal user cannot create such a target. Pointing at one that already exists (`/etc/hosts`)
+    // does not help either: the guard would stand aside, the content would fail to parse, and
+    // `readFilterState` swallows that silently, so both outcomes are `filter-unavailable` and
+    // nothing has been observed. This is the case that separates them, and only root can build it.
+    it.skipIf(process.getuid?.() !== 0)(
+      'refuses a symlink at the fallback path even when it points at a file it would trust (root only)',
+      async () => {
+        armed()
+        writeFileSync(join(dir, 'NO_CONFIRM'), '')
+        writeFileSync(join(dir, 'NO_STATE'), '')
+
+        // The target is everything the guard trusts: root-owned, writable by nobody else, in a
+        // directory nobody else can write, and carrying a live-looking publication that names the
+        // device. Without `O_NOFOLLOW` the checks run on *this* file and every one of them passes,
+        // so the class believes a state file the provider never wrote — an "offline" control over a
+        // simulator whose traffic is flowing, which is the sign-off #734 exists to prevent.
+        const protectedDir = join(dir, 'protected')
+        mkdirSync(protectedDir, { mode: 0o755 })
+        const target = join(protectedDir, 'real.json')
+        writeFileSync(target, JSON.stringify({
+          at: Math.floor(Date.now() / 1000), pid: 1, pulseSeconds: 1, rule: [UDID],
+        }))
+        chownSync(target, 0, 0)
+        chmodSync(target, 0o644)
+
+        const open = join(dir, 'symlinked')
+        mkdirSync(open)
+        chmodSync(open, 0o1777)
+        const link = join(open, 'state.json')
+        symlinkSync(target, link)
+        expect(statSync(link).uid, 'through the link the target reads as root-owned').toBe(0)
+
+        const net = make(undefined, 300, [join(dir, 'state.json'), link])
+        await expect(net.setOffline(UDID, true)).resolves.toEqual({
+          offline: false, available: false, reason: 'filter-unavailable',
+        })
+        nothingApplied()
+      })
+
+    // **Only root can build this, and skipping is the honest answer rather than a weaker case.** The
+    // condition is `file.uid !== 0 || (file.mode & 0o022) !== 0`: for anyone but root the first half
+    // is already true, so the second never decides anything and no test running as a normal user can
+    // reach it. Named so a skip reads as a skip in the output rather than as a pass.
+    it.skipIf(process.getuid?.() !== 0)(
+      'refuses a root-owned state file that anyone can write to (root only)', async () => {
+        armed()
+        writeFileSync(join(dir, 'NO_CONFIRM'), '')
+        writeFileSync(join(dir, 'NO_STATE'), '')
+
+        const open = join(dir, 'rootowned')
+        mkdirSync(open)
+        chmodSync(open, 0o1777)
+        const path = join(open, 'state.json')
+        writeFileSync(path, JSON.stringify({
+          at: Math.floor(Date.now() / 1000), pid: 1, pulseSeconds: 1, rule: [UDID],
+        }))
+        // Root-owned, so the first half of the condition passes — and world-writable, which is what
+        // the second half is for. An attacker who cannot own the file can still rewrite it.
+        chownSync(path, 0, 0)
+        chmodSync(path, 0o666)
+        expect(statSync(path).uid, 'the file is root-owned, so only the mode can refuse it').toBe(0)
+
+        const net = make(undefined, 300, [join(dir, 'state.json'), path])
+        await expect(net.setOffline(UDID, true)).resolves.toEqual({
+          offline: false, available: false, reason: 'filter-unavailable',
+        })
+        nothingApplied()
+      })
 
     it('returns from a FIFO at the fallback path rather than blocking on it', async () => {
       // Opening a FIFO read-only waits for a writer, and the check that refuses a non-regular file

@@ -137,6 +137,29 @@ describe('which process gets hooked', () => {
   })
 })
 
+describe('how far the descriptor scan goes', () => {
+  const ask2 = (...a) => ask(...a).split('\t').map(Number)
+
+  // `RLIMIT_NOFILE` can be `OPEN_MAX`, and walking millions of descriptors on a toggle is worse than
+  // missing the tail of a process holding more than the cap.
+  it.each([
+    [1, 256, 256, 0, 'a limit below the cap is used as it stands'],
+    [1, 8192, 8192, 0, 'exactly the cap is not a cap'],
+    [1, 8193, 8192, 1, 'one over is'],
+    [1, 1048576, 8192, 1, 'and so is a limit of the size that made this necessary'],
+    [0, 999999, 1024, 0, 'an unreadable or infinite limit falls back to 1024, not to the huge value'],
+  ])('haveLimit=%i soft=%i gives %i capped=%i (%s)', (have, soft, bound, capped) => {
+    expect(ask2('fdscan', have, soft)).toEqual([bound, capped])
+  })
+
+  // **The flag exists so the truncation is audible.** A silent cap looks exactly like a process with
+  // nothing left to cut, and that is the reading a person would take from the log.
+  it('says it trimmed only when it trimmed', () => {
+    expect(ask2('fdscan', 1, 8192)[1], 'at the boundary').toBe(0)
+    expect(ask2('fdscan', 1, 8193)[1], 'just past it').toBe(1)
+  })
+})
+
 describe('where the offline flag lives', () => {
   it('is /tmp/tapflow-offline-<udid>', () => {
     const [written] = ask('condpath', '752C0B5F-B060-4A5A-9D22-1DE9DAD483B3').split('\t')

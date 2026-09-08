@@ -118,4 +118,10 @@ mutate "path: the prefix moves"     's|/tmp/tapflow-offline-|/tmp/tapflow-off-|'
 mutate "path: the directory moves"  's|/tmp/tapflow-offline-|/var/tmp/tapflow-offline-|'       || fails=1
 mutate "path: the udid is dropped"      's|"/tmp/tapflow-offline-%s", udid|"/tmp/tapflow-offline-%.0s", udid|' || fails=1
 
+# --- how far the descriptor scan goes ---
+mutate "fd: the cap is ignored"      's@if (max > TF_MAX_FD_SCAN) {@if (0) {@'                   || fails=1
+mutate "fd: off by one at the cap"   's@if (max > TF_MAX_FD_SCAN) {@if (max >= TF_MAX_FD_SCAN) {@' || fails=1
+mutate "fd: no fallback"             's@int max = haveLimit ? (int)soft : 1024;@int max = haveLimit >= 0 ? (int)soft : 1024;@' || fails=1
+mutate "fd: trims without saying so" 's@if (capped != NULL) \*capped = 1;@if (capped != NULL) *capped = 0;@' || fails=1
+
 [[ $fails -eq 0 ]] && echo "=== all mutations killed ===" || { echo "=== a mutation survived ==="; exit 1; }

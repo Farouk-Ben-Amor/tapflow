@@ -103,4 +103,32 @@ static inline int tf_condition_path_decision(char *out, size_t n, const char *ud
   return snprintf(out, n, "/tmp/tapflow-offline-%s", udid);
 }
 
+// MARK: - how far the descriptor scan goes
+
+/**
+ * The scan bound, and what it costs when it truncates.
+ *
+ * `tf_cut_open_connections` walks descriptors to shut down the app's external sockets. `RLIMIT_NOFILE`
+ * can be enormous — `OPEN_MAX` — and walking millions of them on a toggle is worse than missing the
+ * tail of a process holding more than this.
+ *
+ * **`capped` is why this returns two things.** A silent cap looks exactly like a process with nothing
+ * left to cut, so the caller logs when it trims — and a boolean nothing sets is a log line nothing
+ * fires. Passing it back is what lets a test hold the difference.
+ *
+ * `haveLimit` is the caller's `getrlimit(…) == 0 && rl.rlim_cur != RLIM_INFINITY`: an unreadable limit
+ * and an infinite one are the same answer here, which is to fall back rather than to walk forever.
+ */
+#define TF_MAX_FD_SCAN 8192
+
+static inline int tf_fd_scan_bound(int haveLimit, unsigned long long soft, int *capped) {
+  int max = haveLimit ? (int)soft : 1024;
+  if (max > TF_MAX_FD_SCAN) {
+    if (capped != NULL) *capped = 1;
+    return TF_MAX_FD_SCAN;
+  }
+  if (capped != NULL) *capped = 0;
+  return max;
+}
+
 #endif /* TAPFLOW_HOOK_DECISIONS_H */

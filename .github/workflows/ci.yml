@@ -139,6 +139,29 @@ jobs:
       - if: matrix.node == 24
         run: packages/ios-agent/mutate-nethook.sh
 
+      # **Two guard cases that only root can build, run where root is available.**
+      #
+      # `readIfProviderWrote` believes a file in a world-writable directory only when root owns it and
+      # nobody else can change it. The two halves of that — the symlink refusal and the mode check —
+      # change the answer only for a *root-owned* target, and a suite running as a normal user cannot
+      # create one. Both `skipIf` themselves off everywhere else, so without this step they would be
+      # coverage that never executes.
+      #
+      # **The `grep` is the point.** `vitest -t` exits 0 when its filter matches nothing and when
+      # every match skips, so the step would pass silently if a rename broke the filter or `skipIf`
+      # went the wrong way. Asserting that two tests actually passed is what makes a silent skip loud.
+      #
+      # Last in the job: it runs as root and leaves root-owned cache under `node_modules`, which
+      # nothing after it has to read. Only on one leg — this is about filesystem ownership, not Node.
+      - name: The state-file guard cases that only root can build
+        if: matrix.node == 24
+        run: |
+          set -euo pipefail
+          out=$(sudo -E env "PATH=$PATH" pnpm --filter @tapflowio/ios-agent exec \
+                  vitest run -t 'root only' 2>&1) || { echo "$out"; exit 1; }
+          echo "$out" | tail -15
+          grep -qE "Tests +2 passed" <<<"$out"
+
   # **The Swift the job above cannot touch — named for the language, not for today's one suite.**
   #
   # Swift is spread across this repo (`ios-netfilter`, `xctest-runner`, `netprobe`, the helper
