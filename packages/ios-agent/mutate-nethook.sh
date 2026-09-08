@@ -96,7 +96,13 @@ mutate "block: both required"            's@return forced || conditionFilePresen
 
 # tf_should_activate_decision — every other process in the simulator stops here
 mutate "act: a missing udid activates"   's@^  if (udid == NULL.*return 0;$@  if (udid == NULL || *udid == 0) return 1;@' || fails=1
-mutate "act: blank udid counts"          's@udid == NULL || \*udid == @udid == NULL \&\& *udid == @' || fails=1
+# **The NULL guard is kept, and that is the difference between a mutation and a coin flip.**
+# Rewriting the `||` to `&&` also kills this, but the mutant then dereferences NULL on the
+# `--null` case — undefined behaviour whose result is whatever the compiler decided. Measured:
+# clang at `-O2` folded it away and the blank case did the killing; gcc need not. Dropping only
+# the empty-string term leaves defined code, and the case the mutation is named for is the one
+# that fails on every platform. Raised by CodeRabbit on #763.
+mutate "act: blank udid counts"          's@if (udid == NULL.*) return 0;@if (udid == NULL) return 0;@' || fails=1
 # **Flipped rather than deleted, and the difference is a finding.** Deleting this guard survives:
 # an empty target reaches `strcmp` and never matches a real bundle id, so the outcome is identical,
 # and a NULL target is undefined behaviour that `-O2` is free to assume away — neither is something a
