@@ -45,11 +45,16 @@ jobs:
           # snapshot from when the event fired, so anything main gained since would be counted as
           # part of the PR — safe, but it inflates how often the Swift job runs, which is the whole
           # point of this gate.
+          # **A `git` that errors is another way of not knowing, and `set -e` made it the one way that
+          # did not fail safe.** The paragraph above promises that anything unanswerable leaves
+          # `netfilter` at `true`; without these the step would die before writing the output, `changes`
+          # would fail, and a required check would go red over a transient error instead of just
+          # running the job. Every one of them falls through to the default.
           base=""
           if git rev-parse --verify --quiet HEAD^2 >/dev/null; then
-            base=$(git rev-parse HEAD^1)
+            base=$(git rev-parse HEAD^1) || base=""
           elif [ -n "${BASE:-}" ] && git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
-            base=$(git merge-base "$BASE" HEAD)
+            base=$(git merge-base "$BASE" HEAD) || base=""
           fi
 
           if [ -n "$base" ]; then
@@ -65,11 +70,14 @@ jobs:
             #    globs `Tests`, so the bundle would silently lose a case.
             #  - `core.quotePath=false`, because git quotes non-ASCII paths — `"packages/…/té.swift"`
             #    with a leading double quote, which `^packages/` cannot match.
-            files=$(git -c core.quotePath=false diff --name-only --no-renames "$base" HEAD)
-            if grep -qE '^(packages/ios-agent/ios-netfilter/|\.github/workflows/ci\.yml$)' <<<"$files"; then
-              changed=true
+            if files=$(git -c core.quotePath=false diff --name-only --no-renames "$base" HEAD); then
+              if grep -qE '^(packages/ios-agent/ios-netfilter/|\.github/workflows/ci\.yml$)' <<<"$files"; then
+                changed=true
+              else
+                changed=false
+              fi
             else
-              changed=false
+              echo "git diff failed against $base — running the Swift job rather than guessing"
             fi
           else
             echo "no usable base (${BASE:-unset}) — running the Swift job rather than guessing"
