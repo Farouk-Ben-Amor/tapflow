@@ -7,6 +7,49 @@ on:
     branches: [main]
 
 jobs:
+  # **What `test-swift` reads, decided once so two places cannot disagree about it.**
+  #
+  # That job is the repository's only macOS job and its longest by an order of magnitude: measured at
+  # 969s against 276s for `test` and 100s for the Docker build, so it alone sets how long a PR waits.
+  # Ten of the last thirty merges touched `ios-netfilter`; the other twenty paid sixteen minutes for a
+  # suite that could not have been affected.
+  #
+  # The isolation is real rather than assumed: `run-tests.sh` references nothing outside its own
+  # directory, and `tests.yml` compiles only files under it. `ci.yml` is watched too, because this job
+  # is where the pinned xcodegen version and its digest live — a change to the job has to run the job.
+  #
+  # **Failing safe means running it.** Every path that cannot answer the question — a missing base, a
+  # commit this checkout does not have, a `git` that errored — leaves `netfilter` at `true`.
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      netfilter: ${{ steps.filter.outputs.netfilter }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: filter
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          changed=true
+          if [ -n "${BASE:-}" ] && git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            merge_base=$(git merge-base "$BASE" HEAD)
+            if git diff --name-only "$merge_base" HEAD \
+                 | grep -qE '^(packages/ios-agent/ios-netfilter/|\.github/workflows/ci\.yml$)'; then
+              changed=true
+            else
+              changed=false
+            fi
+          else
+            echo "no usable base (${BASE:-unset}) — running the Swift job rather than guessing"
+          fi
+          echo "netfilter=$changed" | tee -a "$GITHUB_OUTPUT"
+
   # 22 is the floor `engines.node` declares; 24 is what Docker and the release job run. Testing
   # both is what keeps the floor honest — `>=20.12.0` was declared for a year and never exercised
   # on 20.12, which is how it drifted below what undici already required.
@@ -98,6 +141,8 @@ jobs:
   # and leave the required check unreported, which blocks the merge instead of waving it through.
   # Either way the filter buys nothing, and the cost it would save is real but modest.
   test-swift:
+    needs: changes
+    if: needs.changes.outputs.netfilter == 'true'
     runs-on: macos-15
     # The suite is two Swift files and their tests, but the job is `brew`-free installs plus
     # seventy-one `xcodebuild test` launches — one baseline and one per mutation — and then one
@@ -189,7 +234,7 @@ jobs:
   # exactly how the `changeset` job below exempts bot PRs. Without the assertion it has no step
   # that can fail, so it always succeeds. Either omission makes the gate decorative.
   ci:
-    needs: [test, test-swift]
+    needs: [changes, test, test-swift]
     if: always()
     runs-on: ubuntu-latest
     permissions:
@@ -207,10 +252,21 @@ jobs:
       # this job warns about — and a runner that cannot build the project is something a PR should
       # fail on, which is what a PR is for.
       - run: |
-          echo "test result: ${{ needs.test.result }}"
+          echo "changes result:  ${{ needs.changes.result }} (netfilter=${{ needs.changes.outputs.netfilter }})"
+          echo "test result:     ${{ needs.test.result }}"
           echo "test-swift result: ${{ needs['test-swift'].result }}"
+          [ "${{ needs.changes.result }}" = "success" ]
           [ "${{ needs.test.result }}" = "success" ]
-          [ "${{ needs['test-swift'].result }}" = "success" ]
+          # **A skipped `test-swift` is accepted only when the gate says why.** Loosening this to
+          # `success || skipped` would be the hole the paragraph above warns about, one job over: a
+          # cancelled runner, a dependency that failed, or a mistyped `if:` all produce `skipped`, and
+          # every one of them would then read as a pass on a required check. The gate's own output has
+          # to say the netfilter did not move, and `changes` itself has to have succeeded — asserted
+          # above, because a failed gate leaves this output empty.
+          if [ "${{ needs['test-swift'].result }}" != "success" ]; then
+            [ "${{ needs['test-swift'].result }}" = "skipped" ]
+            [ "${{ needs.changes.outputs.netfilter }}" = "false" ]
+          fi
 
   changeset:
     permissions:
