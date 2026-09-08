@@ -147,9 +147,16 @@ jobs:
       # create one. Both `skipIf` themselves off everywhere else, so without this step they would be
       # coverage that never executes.
       #
-      # **The `grep` is the point.** `vitest -t` exits 0 when its filter matches nothing and when
+      # **Counting them is the point.** `vitest -t` exits 0 when its filter matches nothing and when
       # every match skips, so the step would pass silently if a rename broke the filter or `skipIf`
-      # went the wrong way. Asserting that two tests actually passed is what makes a silent skip loud.
+      # went the wrong way. Requiring that two tests actually passed is what makes a silent skip loud.
+      #
+      # **Read out of the JSON reporter, not out of the summary line.** Parsing that line failed here
+      # three times: `Tests ` matched a skipped suite, `Tests +[0-9]+ failed` matched on macOS and
+      # nothing on ubuntu, and `Tests +2 passed` missed because the runner's output carries ANSI
+      # colour — `Tests \e[22m \e[1m\e[32m2 passed`. A review had cleared that last one after
+      # measuring zero escape bytes locally, which is exactly the shape of assumption that keeps
+      # costing this repository a CI cycle. `numPassedTests` is a field rather than a rendering.
       #
       # Last in the job: it runs as root and leaves root-owned cache under `node_modules`, which
       # nothing after it has to read. Only on one leg — this is about filesystem ownership, not Node.
@@ -157,13 +164,16 @@ jobs:
         if: matrix.node == 24
         run: |
           set -euo pipefail
-          out=$(sudo -E env "PATH=$PATH" pnpm --filter @tapflowio/ios-agent exec \
-                  vitest run -t 'root only' 2>&1) || { echo "$out"; exit 1; }
-          echo "$out" | tail -15
-          grep -qE "Tests +2 passed" <<<"$out" || {
-            echo "expected exactly two 'root only' tests to pass — if you added or renamed one, this count moves with it"
-            exit 1
-          }
+          sudo -E env "PATH=$PATH" pnpm --filter @tapflowio/ios-agent exec \
+            vitest run -t 'root only' --reporter=default --reporter=json --outputFile=/tmp/root-only.json
+          node -e '
+            const r = require("/tmp/root-only.json")
+            if (r.numPassedTests !== 2) {
+              console.error(`expected exactly two "root only" tests to pass, got ${r.numPassedTests}` +
+                            ` of ${r.numTotalTests} — if you added or renamed one, this count moves with it`)
+              process.exit(1)
+            }
+          '
 
   # **The Swift the job above cannot touch — named for the language, not for today's one suite.**
   #
