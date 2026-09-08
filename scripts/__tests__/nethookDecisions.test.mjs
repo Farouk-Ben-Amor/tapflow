@@ -152,7 +152,12 @@ describe('how far the descriptor scan goes', () => {
     // makes the caller's `for (int fd = 0; fd < max; …)` walk nothing while `capped` says it did not
     // trim — no connection cut and no line saying why. The table stopped one row short of it.
     [1, 2147483648, 8192, 1, 'a limit above INT_MAX still clamps, and still says it clamped'],
-    [1, 9223372036854775806, 8192, 1, 'and so does one just under RLIM_INFINITY'],
+    // **A string, because the literal cannot survive JavaScript.** `9223372036854775806` is past
+    // `Number.MAX_SAFE_INTEGER`, so `String()` of it renders `9223372036854776000` — rounded, and
+    // *above* `RLIM_INFINITY` rather than below it. The case would still have passed, on an input the
+    // caller's `!= RLIM_INFINITY` test rejects, while claiming to cover the largest value that test
+    // lets through.
+    [1, '9223372036854775806', 8192, 1, 'and so does the largest finite limit the caller lets through'],
   ])('haveLimit=%i soft=%i gives %i capped=%i (%s)', (have, soft, bound, capped) => {
     expect(ask2('fdscan', have, soft)).toEqual([bound, capped])
   })
