@@ -160,7 +160,10 @@ jobs:
           out=$(sudo -E env "PATH=$PATH" pnpm --filter @tapflowio/ios-agent exec \
                   vitest run -t 'root only' 2>&1) || { echo "$out"; exit 1; }
           echo "$out" | tail -15
-          grep -qE "Tests +2 passed" <<<"$out"
+          grep -qE "Tests +2 passed" <<<"$out" || {
+            echo "expected exactly two 'root only' tests to pass — if you added or renamed one, this count moves with it"
+            exit 1
+          }
 
   # **The Swift the job above cannot touch — named for the language, not for today's one suite.**
   #

@@ -483,7 +483,10 @@ static BOOL tf_peer_is_loopback(const struct sockaddr *addr) {
  * descriptor across `shutdown` itself.
  */
 static void tf_cut_open_connections(void) {
-  struct rlimit rl;
+  // Initialised because `rl.rlim_cur` is now an *argument*, evaluated whether or not `getrlimit`
+  // wrote it. The old ternary short-circuited and never touched it on failure; passing it to a
+  // function does not.
+  struct rlimit rl = { 0, 0 };
   const int haveLimit = (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY);
   int capped = 0;
   const int max = tf_fd_scan_bound(haveLimit, (unsigned long long)rl.rlim_cur, &capped);

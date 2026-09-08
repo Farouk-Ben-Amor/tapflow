@@ -936,13 +936,39 @@ describe('SimulatorNetwork', () => {
       nothingApplied()
     })
 
-    // **Root only, and the reason is the guard's own shape rather than convenience.** `O_NOFOLLOW`
-    // changes the answer in exactly one case: when the file the link points at would otherwise be
-    // believed. That means root-owned and not group- or world-writable — and a test running as a
-    // normal user cannot create such a target. Pointing at one that already exists (`/etc/hosts`)
-    // does not help either: the guard would stand aside, the content would fail to parse, and
-    // `readFilterState` swallows that silently, so both outcomes are `filter-unavailable` and
-    // nothing has been observed. This is the case that separates them, and only root can build it.
+    // **The directory the link sits in is what decides whether root is needed, and the first version
+    // of this got that backwards.** `readIfProviderWrote` stats `dirname(path)` — the *link's*
+    // directory. Put the link somewhere only its owner can write and the ownership half of the guard
+    // never runs at all, so refusing to follow is the only thing left that can decide. That needs no
+    // root: the target can belong to whoever runs the suite.
+    it('refuses a symlink even where nothing else would refuse the file it points at', async () => {
+      armed()
+      writeFileSync(join(dir, 'NO_CONFIRM'), '')
+      writeFileSync(join(dir, 'NO_STATE'), '')
+
+      // `dir` is a `mkdtemp`, 0700. `(mode & 0o022) === 0`, so the guard stands aside on its own
+      // terms and the target below would be believed if it were ever read.
+      expect(statSync(dir).mode & 0o022, 'the temp directory is writable by its owner only').toBe(0)
+      const target = join(dir, 'real.json')
+      writeFileSync(target, JSON.stringify({
+        at: Math.floor(Date.now() / 1000), pid: 1, pulseSeconds: 1, rule: [UDID],
+      }))
+      const link = join(dir, 'linked.json')
+      symlinkSync(target, link)
+
+      const net = make(undefined, 300, [join(dir, 'state.json'), link])
+      await expect(net.setOffline(UDID, true)).resolves.toEqual({
+        offline: false, available: false, reason: 'filter-unavailable',
+      })
+      nothingApplied()
+    })
+
+    // **The same refusal from the other side, where the directory gives the guard nothing.** With the
+    // link in a world-writable directory the ownership half does run, so the target has to be one the
+    // guard would trust on its own — root-owned and writable by nobody else — and only root can build
+    // that. Pointing at one that already exists (`/etc/hosts`) does not help: the content fails to
+    // parse and `readFilterState` swallows that silently, so both outcomes are `filter-unavailable`
+    // and nothing has been observed.
     it.skipIf(process.getuid?.() !== 0)(
       'refuses a symlink at the fallback path even when it points at a file it would trust (root only)',
       async () => {
@@ -950,14 +976,12 @@ describe('SimulatorNetwork', () => {
         writeFileSync(join(dir, 'NO_CONFIRM'), '')
         writeFileSync(join(dir, 'NO_STATE'), '')
 
-        // The target is everything the guard trusts: root-owned, writable by nobody else, in a
-        // directory nobody else can write, and carrying a live-looking publication that names the
-        // device. Without `O_NOFOLLOW` the checks run on *this* file and every one of them passes,
-        // so the class believes a state file the provider never wrote — an "offline" control over a
-        // simulator whose traffic is flowing, which is the sign-off #734 exists to prevent.
-        const protectedDir = join(dir, 'protected')
-        mkdirSync(protectedDir, { mode: 0o755 })
-        const target = join(protectedDir, 'real.json')
+        // The target is what the guard trusts: root-owned, writable by nobody else, carrying a
+        // live-looking publication that names the device. Its own directory is not part of that —
+        // `readIfProviderWrote` stats the *link's* directory — so it goes straight in `dir`. Without
+        // `O_NOFOLLOW` the checks run on this file, every one of them passes, and the class believes
+        // a state file the provider never wrote.
+        const target = join(dir, 'root-owned.json')
         writeFileSync(target, JSON.stringify({
           at: Math.floor(Date.now() / 1000), pid: 1, pulseSeconds: 1, rule: [UDID],
         }))

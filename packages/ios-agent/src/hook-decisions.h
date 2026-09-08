@@ -122,13 +122,19 @@ static inline int tf_condition_path_decision(char *out, size_t n, const char *ud
 #define TF_MAX_FD_SCAN 8192
 
 static inline int tf_fd_scan_bound(int haveLimit, unsigned long long soft, int *capped) {
-  int max = haveLimit ? (int)soft : 1024;
-  if (max > TF_MAX_FD_SCAN) {
-    if (capped != NULL) *capped = 1;
-    return TF_MAX_FD_SCAN;
-  }
-  if (capped != NULL) *capped = 0;
-  return max;
+  // **Decided in 64 bits, cast only once it fits.** `rlim_t` is 64-bit and `(int)` of anything above
+  // `INT_MAX` is negative or zero, which makes the caller's `for (int fd = 0; fd < max; ...)` walk
+  // nothing — no connection shut down, and `capped` reporting that nothing was trimmed, so the log
+  // that exists to make a truncated scan audible never fires. That is an "offline" control over open
+  // connections, reached through an integer conversion. The caller's `!= RLIM_INFINITY` test does not
+  // cover it: any finite value above `INT_MAX` passes that and truncates here.
+  //
+  // Asking whether it trimmed *before* trimming is the other half. Clamping first and then comparing
+  // the clamped value answers "no" every time, which is the same silence by a different route.
+  const unsigned long long want = haveLimit ? soft : 1024ULL;
+  const int trimmed = want > (unsigned long long)TF_MAX_FD_SCAN;
+  if (capped != NULL) *capped = trimmed;
+  return trimmed ? TF_MAX_FD_SCAN : (int)want;
 }
 
 #endif /* TAPFLOW_HOOK_DECISIONS_H */

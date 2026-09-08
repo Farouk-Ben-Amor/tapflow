@@ -119,9 +119,10 @@ mutate "path: the directory moves"  's|/tmp/tapflow-offline-|/var/tmp/tapflow-of
 mutate "path: the udid is dropped"      's|"/tmp/tapflow-offline-%s", udid|"/tmp/tapflow-offline-%.0s", udid|' || fails=1
 
 # --- how far the descriptor scan goes ---
-mutate "fd: the cap is ignored"      's@if (max > TF_MAX_FD_SCAN) {@if (0) {@'                   || fails=1
-mutate "fd: off by one at the cap"   's@if (max > TF_MAX_FD_SCAN) {@if (max >= TF_MAX_FD_SCAN) {@' || fails=1
-mutate "fd: no fallback"             's@int max = haveLimit ? (int)soft : 1024;@int max = haveLimit >= 0 ? (int)soft : 1024;@' || fails=1
-mutate "fd: trims without saying so" 's@if (capped != NULL) \*capped = 1;@if (capped != NULL) *capped = 0;@' || fails=1
+mutate "fd: the cap is ignored"      's@const int trimmed = want > (unsigned long long)TF_MAX_FD_SCAN;@const int trimmed = want > 0 \&\& 0;@' || fails=1
+mutate "fd: off by one at the cap"   's@want > (unsigned long long)TF_MAX_FD_SCAN@want >= (unsigned long long)TF_MAX_FD_SCAN@' || fails=1
+mutate "fd: no fallback"             's@haveLimit ? soft : 1024ULL@haveLimit >= 0 ? soft : 1024ULL@' || fails=1
+mutate "fd: casts before clamping"   's@return trimmed ? TF_MAX_FD_SCAN : (int)want;@return (int)want;@' || fails=1
+mutate "fd: trims without saying so" 's@\*capped = trimmed;@*capped = 0 \&\& trimmed;@' || fails=1
 
 [[ $fails -eq 0 ]] && echo "=== all mutations killed ===" || { echo "=== a mutation survived ==="; exit 1; }

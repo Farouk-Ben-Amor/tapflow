@@ -148,6 +148,11 @@ describe('how far the descriptor scan goes', () => {
     [1, 8193, 8192, 1, 'one over is'],
     [1, 1048576, 8192, 1, 'and so is a limit of the size that made this necessary'],
     [0, 999999, 1024, 0, 'an unreadable or infinite limit falls back to 1024, not to the huge value'],
+    // **Above `INT_MAX`, which is where the cast used to turn the bound negative.** A negative bound
+    // makes the caller's `for (int fd = 0; fd < max; …)` walk nothing while `capped` says it did not
+    // trim — no connection cut and no line saying why. The table stopped one row short of it.
+    [1, 2147483648, 8192, 1, 'a limit above INT_MAX still clamps, and still says it clamped'],
+    [1, 9223372036854775806, 8192, 1, 'and so does one just under RLIM_INFINITY'],
   ])('haveLimit=%i soft=%i gives %i capped=%i (%s)', (have, soft, bound, capped) => {
     expect(ask2('fdscan', have, soft)).toEqual([bound, capped])
   })
