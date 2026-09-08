@@ -448,11 +448,7 @@ static BOOL tf_peer_is_loopback(const struct sockaddr *addr) {
  *  - `getpeername` fails with `ENOTCONN` on a listening or unconnected socket, so tapflow's own
  *    in-simulator listener (the UI-tree runner, #433) is never touched
  */
-/** The scan bound, and what it costs when it truncates. `RLIMIT_NOFILE` can be enormous
- *  (`OPEN_MAX`), and walking millions of descriptors on a toggle is worse than missing the tail of a
- *  process holding more than this. When it does truncate, it says so — a silent cap would look
- *  exactly like a process with nothing left to cut. */
-#define TF_MAX_FD_SCAN 8192
+// `TF_MAX_FD_SCAN` and the bound it feeds are in `hook-decisions.h`, where a test reaches them.
 
 /**
  * Shut down the app's own external TCP connections.
@@ -487,11 +483,15 @@ static BOOL tf_peer_is_loopback(const struct sockaddr *addr) {
  * descriptor across `shutdown` itself.
  */
 static void tf_cut_open_connections(void) {
-  struct rlimit rl;
-  int max = (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY) ? (int)rl.rlim_cur : 1024;
-  if (max > TF_MAX_FD_SCAN) {
-    os_log(tf_log(), "fd scan capped at %{public}d of %{public}d", TF_MAX_FD_SCAN, max);
-    max = TF_MAX_FD_SCAN;
+  // Initialised because `rl.rlim_cur` is now an *argument*, evaluated whether or not `getrlimit`
+  // wrote it. The old ternary short-circuited and never touched it on failure; passing it to a
+  // function does not.
+  struct rlimit rl = { 0, 0 };
+  const int haveLimit = (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY);
+  int capped = 0;
+  const int max = tf_fd_scan_bound(haveLimit, (unsigned long long)rl.rlim_cur, &capped);
+  if (capped) {
+    os_log(tf_log(), "fd scan capped at %{public}d of %{public}llu", max, (unsigned long long)rl.rlim_cur);
   }
 
   int cut = 0, raced = 0;

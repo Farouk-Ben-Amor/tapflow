@@ -82,6 +82,14 @@ int main(int argc, char **argv) {
     free(buf);
     return 0;
   }
+  if (strcmp(what, "fdscan") == 0 && argc == 4) {
+    int capped = -1;
+    int max = tf_fd_scan_bound(atoi(argv[2]), strtoull(argv[3], NULL, 10), &capped);
+    /* Both halves: the bound, and whether it says it trimmed. A cap nothing reports is
+     * indistinguishable from a process with nothing left to cut. */
+    printf("%d\t%d\n", max, capped);
+    return 0;
+  }
   fprintf(stderr, "unknown case: %s (argc %d)\n", what, argc);
   return 2;
 }

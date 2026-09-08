@@ -1,5 +1,5 @@
 import { execFileSync } from 'child_process'
-import { appendFileSync, chmodSync, chownSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
+import { appendFileSync, chmodSync, chownSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -935,6 +935,102 @@ describe('SimulatorNetwork', () => {
       })
       nothingApplied()
     })
+
+    // **The directory the link sits in is what decides whether root is needed, and the first version
+    // of this got that backwards.** `readIfProviderWrote` stats `dirname(path)` — the *link's*
+    // directory. Put the link somewhere only its owner can write and the ownership half of the guard
+    // never runs at all, so refusing to follow is the only thing left that can decide. That needs no
+    // root: the target can belong to whoever runs the suite.
+    it('refuses a symlink even where nothing else would refuse the file it points at', async () => {
+      armed()
+      writeFileSync(join(dir, 'NO_CONFIRM'), '')
+      writeFileSync(join(dir, 'NO_STATE'), '')
+
+      // `dir` is a `mkdtemp`, 0700. `(mode & 0o022) === 0`, so the guard stands aside on its own
+      // terms and the target below would be believed if it were ever read.
+      expect(statSync(dir).mode & 0o022, 'the temp directory is writable by its owner only').toBe(0)
+      const target = join(dir, 'real.json')
+      writeFileSync(target, JSON.stringify({
+        at: Math.floor(Date.now() / 1000), pid: 1, pulseSeconds: 1, rule: [UDID],
+      }))
+      const link = join(dir, 'linked.json')
+      symlinkSync(target, link)
+
+      const net = make(undefined, 300, [join(dir, 'state.json'), link])
+      await expect(net.setOffline(UDID, true)).resolves.toEqual({
+        offline: false, available: false, reason: 'filter-unavailable',
+      })
+      nothingApplied()
+    })
+
+    // **The same refusal from the other side, where the directory gives the guard nothing.** With the
+    // link in a world-writable directory the ownership half does run, so the target has to be one the
+    // guard would trust on its own — root-owned and writable by nobody else — and only root can build
+    // that. Pointing at one that already exists (`/etc/hosts`) does not help: the content fails to
+    // parse and `readFilterState` swallows that silently, so both outcomes are `filter-unavailable`
+    // and nothing has been observed.
+    it.skipIf(process.getuid?.() !== 0)(
+      'refuses a symlink at the fallback path even when it points at a file it would trust (root only)',
+      async () => {
+        armed()
+        writeFileSync(join(dir, 'NO_CONFIRM'), '')
+        writeFileSync(join(dir, 'NO_STATE'), '')
+
+        // The target is what the guard trusts: root-owned, writable by nobody else, carrying a
+        // live-looking publication that names the device. Its own directory is not part of that —
+        // `readIfProviderWrote` stats the *link's* directory — so it goes straight in `dir`. Without
+        // `O_NOFOLLOW` the checks run on this file, every one of them passes, and the class believes
+        // a state file the provider never wrote.
+        const target = join(dir, 'root-owned.json')
+        writeFileSync(target, JSON.stringify({
+          at: Math.floor(Date.now() / 1000), pid: 1, pulseSeconds: 1, rule: [UDID],
+        }))
+        chownSync(target, 0, 0)
+        chmodSync(target, 0o644)
+
+        const open = join(dir, 'symlinked')
+        mkdirSync(open)
+        chmodSync(open, 0o1777)
+        const link = join(open, 'state.json')
+        symlinkSync(target, link)
+        expect(statSync(link).uid, 'through the link the target reads as root-owned').toBe(0)
+
+        const net = make(undefined, 300, [join(dir, 'state.json'), link])
+        await expect(net.setOffline(UDID, true)).resolves.toEqual({
+          offline: false, available: false, reason: 'filter-unavailable',
+        })
+        nothingApplied()
+      })
+
+    // **Only root can build this, and skipping is the honest answer rather than a weaker case.** The
+    // condition is `file.uid !== 0 || (file.mode & 0o022) !== 0`: for anyone but root the first half
+    // is already true, so the second never decides anything and no test running as a normal user can
+    // reach it. Named so a skip reads as a skip in the output rather than as a pass.
+    it.skipIf(process.getuid?.() !== 0)(
+      'refuses a root-owned state file that anyone can write to (root only)', async () => {
+        armed()
+        writeFileSync(join(dir, 'NO_CONFIRM'), '')
+        writeFileSync(join(dir, 'NO_STATE'), '')
+
+        const open = join(dir, 'rootowned')
+        mkdirSync(open)
+        chmodSync(open, 0o1777)
+        const path = join(open, 'state.json')
+        writeFileSync(path, JSON.stringify({
+          at: Math.floor(Date.now() / 1000), pid: 1, pulseSeconds: 1, rule: [UDID],
+        }))
+        // Root-owned, so the first half of the condition passes — and world-writable, which is what
+        // the second half is for. An attacker who cannot own the file can still rewrite it.
+        chownSync(path, 0, 0)
+        chmodSync(path, 0o666)
+        expect(statSync(path).uid, 'the file is root-owned, so only the mode can refuse it').toBe(0)
+
+        const net = make(undefined, 300, [join(dir, 'state.json'), path])
+        await expect(net.setOffline(UDID, true)).resolves.toEqual({
+          offline: false, available: false, reason: 'filter-unavailable',
+        })
+        nothingApplied()
+      })
 
     it('returns from a FIFO at the fallback path rather than blocking on it', async () => {
       // Opening a FIFO read-only waits for a writer, and the check that refuses a non-regular file
