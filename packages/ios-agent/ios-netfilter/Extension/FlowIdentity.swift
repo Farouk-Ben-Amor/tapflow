@@ -2,11 +2,10 @@ import Foundation
 
 // The pure half of flow handling, kept in its own file **so it can be tested** (#690).
 //
-// Everything else on the attribution path reads the live kernel — `sysctl(KERN_PROC)` for the parent
-// walk, `KERN_PROCARGS2` for the arguments, `proc_pidpath` for the executable — and none of that can
-// be stood up in a unit test. What is left once those are peeled away is this: a string arrived, and a
-// device identifier has to come out of it. That part is decidable from its inputs alone, so it is the
-// part a test can hold.
+// The three kernel reads on that path — `sysctl(KERN_PROC)` for a process's parent,
+// `KERN_PROCARGS2` for its arguments, `proc_pidpath` for its executable — cannot be stood up in a
+// unit test, so they stay in `Provider.swift`. Everything decided *from* them is here, including the
+// climb that composes them: `attributeWalk` takes them as a `ProcessReader` rather than calling them.
 //
 // It is `internal` rather than `private` for the same reason: the test bundle compiles this file
 // directly (`tests.yml`), and a `private` function would not be visible to it.
@@ -154,7 +153,8 @@ func asidFromToken(_ data: Data) -> UInt32 {
  *
  * `procSysctl` fills this in from `KERN_PROC` and stays in `Provider.swift` — the kernel read is the
  * half a test cannot stand up. What a test can hold is that two different starts are two different
- * devices, which is the whole point of the field.
+ * devices, which is the whole point of the field: `UDIDCache` holds that for the dictionary's key,
+ * and `attributeWalk` holds it for what the caller hands in, which is a separate question.
  */
 struct ProcIdentity: Hashable {
     let pid: pid_t
@@ -242,8 +242,9 @@ func prunedDrops(_ counts: [String: Int], rule: Set<String>) -> [String: Int] {
  * been offline could reach the network because a `sysctl` returned an error, with the log calling it
  * a host flow (#642).
  *
- * The walk that produces this reads the live kernel and stays in `Provider.swift`. What is decidable
- * is what the answer *means*, which is `decideFlow` below.
+ * The walk that produces this is `attributeWalk`, at the bottom of this file; the three kernel reads
+ * it climbs through stay in `Provider.swift`. What is decidable from the answer itself is what it
+ * *means*, which is `decideFlow` below.
  */
 enum Attribution: Equatable {
     case simulator(String)

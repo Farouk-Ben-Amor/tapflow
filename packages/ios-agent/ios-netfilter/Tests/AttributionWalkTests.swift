@@ -10,6 +10,10 @@ import XCTest
 /// Every `.unresolved` assertion here was verified by the mutation that turns it into something else
 /// — see `run-tests.sh --mutate`. A case asserting that a flow is *not* attributed passes when nothing
 /// is attributed, which is its definition.
+///
+/// That includes the bound. Removing it makes the cycle case loop rather than fail, which is why the
+/// runner enables XCTest's own execution-time allowance: a hang becomes a reported timeout, the run
+/// continues, and the mutation is killed by an assertion with a name on it.
 final class AttributionWalkTests: XCTestCase {
 
     private let udid = "752C0B5F-B060-4A5A-9D22-1DE9DAD483B3"
@@ -18,6 +22,9 @@ final class AttributionWalkTests: XCTestCase {
 
     /// A tree as `(pid: (ppid, path, args))`, plus counters for what the walk actually read.
     private struct Tree {
+        /// Folded into the identity's start time, so the same pid can be two different boots — which
+        /// is the whole reason `ProcIdentity` carries one.
+        var boot: Int64 = 1
         var parents: [pid_t: pid_t] = [:]
         var paths: [pid_t: String] = [:]
         var args: [pid_t: String] = [:]
@@ -34,7 +41,7 @@ final class AttributionWalkTests: XCTestCase {
                 guard let ppid = t.parents[pid] else { return nil }
                 // The start time is what makes a pid an identity; derived from the pid so two
                 // different pids are two different devices without the test spelling it out.
-                return (ppid, ProcIdentity(pid: pid, startSec: Int64(pid) * 1000, startUsec: 0))
+                return (ppid, ProcIdentity(pid: pid, startSec: Int64(pid) * 1000 + t.boot, startUsec: 0))
             },
             executablePath: { pid in t.pathReads += 1; return t.paths[pid] },
             arguments: { pid in t.argReads += 1; return t.args[pid] })
@@ -67,8 +74,40 @@ final class AttributionWalkTests: XCTestCase {
         tree.parents = [10: 20, 20: 30, 30: 1]
         tree.paths = [30: "/…/launchd_sim"]
         tree.args = [30: simArgs]
-        let (r, _) = reader(tree)
+        let (r, counts) = reader(tree)
         XCTAssertEqual(attributeWalk(10, reading: r, cache: UDIDCache()), .simulator(udid))
+        // **The executable is read once, at the top.** `proc_pidpath` is a kernel call and the climb
+        // has no use for it below the stop; reading at every level would put one per ancestor on the
+        // flow path. The closures in `ProcessReader` are what make that visible — nothing else here
+        // could tell a read that happened from one that did not.
+        XCTAssertEqual(counts().pathReads, 1, "the path was read at more levels than the one that stops")
+    }
+
+    /// **The identity the walk hands the cache, which is a different question from what the cache
+    /// does with it.** macOS reuses pids and `launchd_sim`'s is reused readily — one per simulator
+    /// boot. Keyed on the number alone, the walk answers for a simulator that no longer exists, and
+    /// the consequence is not a stale label: it is a device nobody asked to cut, with every log line
+    /// agreeing that the udid was right.
+    ///
+    /// `UDIDCache` has its own mutation for the dictionary's key type. This is the other half — what
+    /// the caller passes in — and nothing held it before.
+    func testTheSamePIDFromANewBootIsNotACacheHit() {
+        var first = Tree()
+        first.parents = [900: 1]
+        first.paths = [900: "/…/launchd_sim"]
+        first.args = [900: simArgs]
+        let cache = UDIDCache()
+        let (r1, c1) = reader(first)
+        XCTAssertEqual(attributeWalk(900, reading: r1, cache: cache), .simulator(udid))
+        XCTAssertEqual(c1().argReads, 1)
+
+        // Same pid, a later boot. The arguments have to be read again, because this is not the
+        // process the first answer was about.
+        var second = first
+        second.boot = 2
+        let (r2, c2) = reader(second)
+        XCTAssertEqual(attributeWalk(900, reading: r2, cache: cache), .simulator(udid))
+        XCTAssertEqual(c2().argReads, 1, "the new boot was answered from the old boot's entry")
     }
 
     // MARK: - the simulator case
