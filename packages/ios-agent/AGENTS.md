@@ -815,7 +815,7 @@ bundle, because neither target can be linked by one.
 *not* allowed, and a test asserting absence passes when nothing happens — that is its definition, so
 a green run is not evidence it holds anything
 ([contributing/test-and-guard-coverage.md](../../contributing/test-and-guard-coverage.md) rule 2).
-The flag breaks the sources forty-one ways and requires each one to fail a test. Its first draft could
+The flag breaks the sources eighty-two ways and requires each one to fail a test. Its first draft could
 not have done that: `run()` piped `xcodebuild` into `grep` and returned *grep's* status, so a mutation
 that did not even compile would have been reported as killed.
 
