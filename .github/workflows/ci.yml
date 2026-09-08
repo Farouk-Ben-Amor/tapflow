@@ -37,10 +37,36 @@ jobs:
         run: |
           set -euo pipefail
           changed=true
-          if [ -n "${BASE:-}" ] && git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
-            merge_base=$(git merge-base "$BASE" HEAD)
-            if git diff --name-only "$merge_base" HEAD \
-                 | grep -qE '^(packages/ios-agent/ios-netfilter/|\.github/workflows/ci\.yml$)'; then
+
+          # **`HEAD^1` on a pull request, because the checkout is the merge commit.**
+          # `actions/checkout` gives `refs/pull/N/merge` for a `pull_request` event, whose first
+          # parent is the base branch as it stands now and whose second is the PR's head. Diffing
+          # against the first parent is exactly this PR's changes. `base.sha` from the payload is a
+          # snapshot from when the event fired, so anything main gained since would be counted as
+          # part of the PR — safe, but it inflates how often the Swift job runs, which is the whole
+          # point of this gate.
+          base=""
+          if git rev-parse --verify --quiet HEAD^2 >/dev/null; then
+            base=$(git rev-parse HEAD^1)
+          elif [ -n "${BASE:-}" ] && git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            base=$(git merge-base "$BASE" HEAD)
+          fi
+
+          if [ -n "$base" ]; then
+            # **Collected before it is matched, and three things live in that decision.**
+            #
+            #  - `git … | grep -q` under `pipefail` reports a MATCH as no-match: `grep` exits at the
+            #    first hit, `git` takes SIGPIPE and returns 141, and the pipeline's status is 141, so
+            #    the `else` branch runs. Measured: with `.github/workflows/ci.yml` 39th in a listing
+            #    of 3,001 paths, `changed` came out `false` and the step exited 0. That is a PR
+            #    editing this job and skipping this job.
+            #  - `--no-renames`, because rename detection prints only the destination. Moving a file
+            #    OUT of `ios-netfilter/` otherwise produces no matching line at all, and `tests.yml`
+            #    globs `Tests`, so the bundle would silently lose a case.
+            #  - `core.quotePath=false`, because git quotes non-ASCII paths — `"packages/…/té.swift"`
+            #    with a leading double quote, which `^packages/` cannot match.
+            files=$(git -c core.quotePath=false diff --name-only --no-renames "$base" HEAD)
+            if grep -qE '^(packages/ios-agent/ios-netfilter/|\.github/workflows/ci\.yml$)' <<<"$files"; then
               changed=true
             else
               changed=false
