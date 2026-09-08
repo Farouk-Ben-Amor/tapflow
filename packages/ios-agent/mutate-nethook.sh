@@ -50,17 +50,19 @@ mutate () {   # $1 = label, $2 = sed program
     echo "  DID NOT APPLY: $1   <-- the sed matched nothing; the header moved under it"
     return 1
   fi
-  if run; then
-    echo "  SURVIVED: $1   <-- it compiled and every test still passed; one of them is decoration"
+  # **Compiled here, before the suite runs.** Whether a mutation built is a fact this script can
+  # establish directly; asking vitest for it is not. Two attempts to read it out of the runner's
+  # summary were wrong — `Tests ` matches a skipped suite, and `Tests N failed` matched locally while
+  # reporting every mutation as broken on the ubuntu runner. The compiler's exit code says the same
+  # thing on both, and its first error line says why.
+  if ! cc -O2 -Wall -Wextra -Werror -I "$WORK" -o "$WORK/probe" \
+       "$REPO/scripts/__tests__/fixtures/nethook-decisions.c" 2> "$WORK/cc.log"; then
+    echo "  BUILD BROKE: $1   <-- it did not compile, so nothing judged it"
+    grep -m1 "error:" "$WORK/cc.log" | sed 's/^/      /'
     return 1
   fi
-  # **`Tests ` alone is not the discriminator, which was measured the hard way.** When `cc` fails in
-  # `beforeAll`, vitest still prints a summary — `Tests  36 skipped (36)` — so a mutation that never
-  # compiled matched the old check and was reported as `killed`. That is precisely the failure the
-  # note above says this mode exists to prevent. A mutation a test actually killed reports
-  # `N failed`; a skipped suite never does.
-  if ! grep -qE "Tests +[0-9]+ failed" "$WORK/log"; then
-    echo "  BUILD BROKE: $1   <-- the harness did not compile or the suite skipped, so nothing judged it"
+  if run; then
+    echo "  SURVIVED: $1   <-- it compiled and every test still passed; one of them is decoration"
     return 1
   fi
   echo "  killed:   $1"
@@ -88,19 +90,19 @@ mutate "loop: v6 family ignored"    's|if (addr->sa_family == AF_INET6) {|if (1)
 # keeps the parameter live, so what the mutation moves is the decision rather than the build.
 # tf_blocking_decision — the install gate is the one that outranks everything
 mutate "block: a partial install blocks" 's|if (!hooksLive) return 0;|if (!hooksLive) return 1;|' || fails=1
-mutate "block: the file is ignored"     's|return forced \|\| conditionFilePresent;|return forced \|\| (conditionFilePresent \&\& 0);|' || fails=1
-mutate "block: the flag is ignored"     's|return forced \|\| conditionFilePresent;|return (forced \&\& 0) \|\| conditionFilePresent;|' || fails=1
-mutate "block: both required"          's|return forced \|\| conditionFilePresent;|return forced \&\& conditionFilePresent;|' || fails=1
+mutate "block: the file is ignored"      's@return forced || conditionFilePresent;@return forced || (conditionFilePresent \&\& 0);@' || fails=1
+mutate "block: the flag is ignored"      's@return forced || conditionFilePresent;@return (forced \&\& 0) || conditionFilePresent;@' || fails=1
+mutate "block: both required"            's@return forced || conditionFilePresent;@return forced \&\& conditionFilePresent;@' || fails=1
 
 # tf_should_activate_decision — every other process in the simulator stops here
-mutate "act: a missing udid activates"  's|^  if (udid == NULL.*return 0;$|  if (udid == NULL \|\| *udid == 0) return 1;|' || fails=1
-mutate "act: blank udid counts"     's|udid == NULL \|\| \*udid == |udid == NULL \&\& *udid == |' || fails=1
+mutate "act: a missing udid activates"   's@^  if (udid == NULL.*return 0;$@  if (udid == NULL || *udid == 0) return 1;@' || fails=1
+mutate "act: blank udid counts"          's@udid == NULL || \*udid == @udid == NULL \&\& *udid == @' || fails=1
 # **Flipped rather than deleted, and the difference is a finding.** Deleting this guard survives:
 # an empty target reaches `strcmp` and never matches a real bundle id, so the outcome is identical,
 # and a NULL target is undefined behaviour that `-O2` is free to assume away — neither is something a
 # test can pin. The guard is still load-bearing (it is what keeps NULL out of `strcmp`); what is
 # testable is the answer it gives, so that is what this moves.
-mutate "act: a missing target activates" 's|^  if (target == NULL.*return 0;$|  if (target == NULL \|\| *target == 0) return 1;|' || fails=1
+mutate "act: a missing target activates" 's@^  if (target == NULL.*return 0;$@  if (target == NULL || *target == 0) return 1;@' || fails=1
 mutate "act: any bundle matches"    's|return strcmp(myBundleId, target) == 0;|return 1;|'     || fails=1
 mutate "act: the wrong bundle"      's|strcmp(myBundleId, target) == 0|strcmp(myBundleId, target) != 0|' || fails=1
 mutate "act: nil bundle accepted"   's|if (myBundleId == NULL) return 0;||'                    || fails=1

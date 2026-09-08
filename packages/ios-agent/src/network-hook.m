@@ -139,6 +139,14 @@ static BOOL tf_should_activate(void) {
   // `tf_condition_path_decision` reports the length it wanted, which is what makes this checkable.
   char probe[PATH_MAX];
   if (tf_condition_path_decision(probe, sizeof probe, udid) >= (int)sizeof probe) return NO;
+  // **Every path derived from the udid, not only the one this function came for.** The verdict's
+  // temporary name is the longest of them, and a udid can fit the condition path while overflowing
+  // it. `tf_write_verdict` refuses a truncated name and returns — correct there, useless here: by
+  // then the hooks are in and cannot be removed, so the process runs hooked while the agent reads
+  // whatever verdict was on disk before. Raised by CodeRabbit on #763, which is also where the
+  // condition path itself came from.
+  if (snprintf(probe, sizeof probe, "/tmp/tapflow-nethook-%s.json.%d.tmp", udid, getpid())
+      >= (int)sizeof probe) return NO;
 
   NSString *me = NSBundle.mainBundle.bundleIdentifier;
   const char *bytes = me.UTF8String;
