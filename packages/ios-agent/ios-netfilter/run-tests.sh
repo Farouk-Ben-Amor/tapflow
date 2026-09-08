@@ -48,8 +48,15 @@ run () {
   xcodegen generate --spec tests.yml >/dev/null || return 1
   # `-derivedDataPath` only under `--mutate`, where it keeps the copy's build products inside the
   # copy. A plain run stays on Xcode's default path so it is incremental across invocations.
+  # **`-test-timeouts-enabled` is what makes a mutation that loops killable at all.** Some decisions
+  # are bounds, and removing a bound does not fail a test — it makes one spin, and a `run` that never
+  # returns stops the whole mode rather than reporting anything. With an allowance, XCTest kills the
+  # case, the run continues, and the assertion that was going to catch it does. Measured: the
+  # `walk: no bound` mutation takes 87s against ~13s for a normal one, and the flags cost nothing on
+  # a green run (3.07s with, 3.71s without — noise).
   xcodebuild test -project "$PROJ" -scheme FilterLogicTests -destination 'platform=macOS,arch=arm64' \
     ${MUTATE_DERIVED:+-derivedDataPath "$MUTATE_DERIVED"} \
+    -test-timeouts-enabled YES -default-test-execution-time-allowance 20 \
     CODE_SIGNING_ALLOWED=NO > "$LOG" 2>&1
 }
 
@@ -252,6 +259,25 @@ mutate "pulse: unpublished ignored" 's/unpublished || now - lastWrite/now - last
 
 # --- where the file goes ---
 mutate "paths: protected path gone" 's|"/Library/Application Support/tapflow",|"/tmp",|'          || fails=1
+
+
+# --- the parent walk: whose traffic a flow is ---
+mutate "walk: a failed read is a host flow" 's/return .unresolved("sysctl failed at pid \\(current)")/return .host/' || fails=1
+mutate "walk: stops only at ppid 1"      's/if info.ppid <= 1 {/if info.ppid == 1 {/'          || fails=1
+mutate "walk: any top is a simulator"    's/!path.hasSuffix("\/launchd_sim")/path.hasSuffix("\/launchd_sim")/' || fails=1
+mutate "walk: an unreadable path is host" 's/if let path = read.executablePath(current), !path.hasSuffix/if read.executablePath(current) == nil { return .host }; if let path = read.executablePath(current), !path.hasSuffix/' || fails=1
+mutate "walk: the cache is not consulted" 's/if let cached = cache.lookup(info.identity) { return .simulator(cached) }//' || fails=1
+mutate "walk: nothing is cached"         's/cache.store(info.identity, udid)//'                || fails=1
+# **The bound gets a mutation after all, and the claim that it could not was untested.** This one
+# does not fail fast — it makes the cycle case spin until the execution-time allowance set in
+# `run` kills it, which is why it costs 87s. That is the price of holding a decision whose
+# failure mode is a hang rather than a wrong answer.
+mutate "walk: no bound"                  's/for _ in 0..<attributionWalkLimit {/while true {/' || fails=1
+mutate "walk: one step short"            's/let attributionWalkLimit = 32/let attributionWalkLimit = 31/' || fails=1
+mutate "walk: judges the flow's own process" 's/current = info.ppid//'                         || fails=1
+mutate "walk: cache keyed on pid only"   's/cache.lookup(info.identity)/cache.lookup(ProcIdentity(pid: current, startSec: 0, startUsec: 0))/' || fails=1
+mutate "walk: caches under a fake identity" 's/cache.store(info.identity, udid)/cache.store(ProcIdentity(pid: current, startSec: 0, startUsec: 0), udid)/' || fails=1
+mutate "walk: reads the path at every level" 's/guard let info = read.parent(current) else {/_ = read.executablePath(current); guard let info = read.parent(current) else {/' || fails=1
 
 restore
 [[ $fails -eq 0 ]] && echo "=== all mutations killed ===" || { echo "=== a mutation survived ==="; exit 1; }

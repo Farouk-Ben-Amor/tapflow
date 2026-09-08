@@ -2,11 +2,10 @@ import Foundation
 
 // The pure half of flow handling, kept in its own file **so it can be tested** (#690).
 //
-// Everything else on the attribution path reads the live kernel — `sysctl(KERN_PROC)` for the parent
-// walk, `KERN_PROCARGS2` for the arguments, `proc_pidpath` for the executable — and none of that can
-// be stood up in a unit test. What is left once those are peeled away is this: a string arrived, and a
-// device identifier has to come out of it. That part is decidable from its inputs alone, so it is the
-// part a test can hold.
+// The three kernel reads on that path — `sysctl(KERN_PROC)` for a process's parent,
+// `KERN_PROCARGS2` for its arguments, `proc_pidpath` for its executable — cannot be stood up in a
+// unit test, so they stay in `Provider.swift`. Everything decided *from* them is here, including the
+// climb that composes them: `attributeWalk` takes them as a `ProcessReader` rather than calling them.
 //
 // It is `internal` rather than `private` for the same reason: the test bundle compiles this file
 // directly (`tests.yml`), and a `private` function would not be visible to it.
@@ -154,7 +153,8 @@ func asidFromToken(_ data: Data) -> UInt32 {
  *
  * `procSysctl` fills this in from `KERN_PROC` and stays in `Provider.swift` — the kernel read is the
  * half a test cannot stand up. What a test can hold is that two different starts are two different
- * devices, which is the whole point of the field.
+ * devices, which is the whole point of the field: `UDIDCache` holds that for the dictionary's key,
+ * and `attributeWalk` holds it for what the caller hands in, which is a separate question.
  */
 struct ProcIdentity: Hashable {
     let pid: pid_t
@@ -242,8 +242,9 @@ func prunedDrops(_ counts: [String: Int], rule: Set<String>) -> [String: Int] {
  * been offline could reach the network because a `sysctl` returned an error, with the log calling it
  * a host flow (#642).
  *
- * The walk that produces this reads the live kernel and stays in `Provider.swift`. What is decidable
- * is what the answer *means*, which is `decideFlow` below.
+ * The walk that produces this is `attributeWalk`, at the bottom of this file; the three kernel reads
+ * it climbs through stay in `Provider.swift`. What is decidable from the answer itself is what it
+ * *means*, which is `decideFlow` below.
  */
 enum Attribution: Equatable {
     case simulator(String)
@@ -466,3 +467,74 @@ let stateFileCandidates = [
     "/Library/Application Support/tapflow",
     "/tmp",
 ]
+
+// MARK: - the parent walk
+
+/**
+ * The three live-kernel reads the walk needs, behind a value **so a test can stand in for them**.
+ *
+ * `sysctl(KERN_PROC)`, `proc_pidpath` and `KERN_PROCARGS2` cannot be stood up in a unit test, and
+ * they are also not where the decisions are. What is decidable is the shape of the climb: when to
+ * stop, what a stop means, which failures become `unresolved` rather than `host`, and when the cache
+ * spares an argument read. That is `attributeWalk`, and this is the seam it reaches the kernel
+ * through.
+ *
+ * **Closures rather than values, which matters here.** Three times in this file's history a read was
+ * turned into an argument and started being evaluated before the branch that needed it. A closure is
+ * not evaluated until it is called, so the walk still pays for exactly the levels it climbs.
+ */
+struct ProcessReader {
+    let parent: (pid_t) -> (ppid: pid_t, identity: ProcIdentity)?
+    let executablePath: (pid_t) -> String?
+    let arguments: (pid_t) -> String?
+}
+
+/// How far the climb goes before it gives up.
+///
+/// A process tree is a handful of levels deep; thirty-two is slack, not a limit anything reaches. It
+/// exists because a cycle — which the kernel should not produce and this code cannot rule out — would
+/// otherwise be an infinite loop **on the flow path**, taking the whole provider with it.
+let attributionWalkLimit = 32
+
+/**
+ * Which simulator a flow's process belongs to, or that it is the Mac's own, or that we could not tell.
+ *
+ * **Three outcomes, where the code used to have two.** `nil` meant both "the Mac's own traffic" and
+ * "the walk failed"; they were logged identically and counted not at all, so a simulator that should
+ * have been offline reached the network because a `sysctl` returned an error, with the log calling it
+ * a host flow (#642).
+ *
+ * The climb stops at `ppid <= 1` — a process whose parent is launchd, or the kernel. What that stop
+ * means is decided by the executable: every process inside a booted simulator descends from that
+ * simulator's `launchd_sim`, and the Mac's own top-level processes do not.
+ *
+ * **An unreadable path falls through on purpose.** The udid in the arguments is the stronger check,
+ * and losing a flow to a failed path read would be the wrong trade — it would report a simulator's
+ * traffic as the Mac's, which is the one direction that lets an offline device keep talking.
+ */
+func attributeWalk(_ pid: pid_t, reading read: ProcessReader, cache: UDIDCache) -> Attribution {
+    var current = pid
+    for _ in 0..<attributionWalkLimit {
+        guard let info = read.parent(current) else {
+            // The process is gone, or the kernel refused. Either way we do not know — and saying so
+            // is the whole point of this case existing separately from `.host`.
+            return .unresolved("sysctl failed at pid \(current)")
+        }
+        if info.ppid <= 1 {
+            if let path = read.executablePath(current), !path.hasSuffix("/launchd_sim") {
+                return .host   // a known top-level process that is not a simulator's launchd
+            }
+            // **Before the argument read, not after.** `KERN_PROCARGS2` is the expensive part of the
+            // walk and `launchd_sim` outlives every flow of its simulator, so the cache is what keeps
+            // the per-flow cost at the climb itself.
+            if let cached = cache.lookup(info.identity) { return .simulator(cached) }
+            guard let udid = read.arguments(current).flatMap(extractUDID) else {
+                return .unresolved("no UDID in the arguments of pid \(current)")
+            }
+            cache.store(info.identity, udid)
+            return .simulator(udid)
+        }
+        current = info.ppid
+    }
+    return .unresolved("parent chain did not terminate")
+}
