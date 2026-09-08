@@ -161,6 +161,8 @@ Run the tests for any changed packages before opening a PR. New behavior must be
 
 **Mock only at system boundaries** — real network, OS calls, external processes. Internal module interactions run against real code.
 
+**Name the mutation.** For every test, know the production change that would make it fail. For a test asserting that something does *not* happen, make that change and watch it fail before you commit — an absence assertion passes when nothing happens at all, so a green run on its own is not evidence it holds anything. [test-and-guard-coverage.md](./contributing/test-and-guard-coverage.md) collects the cases where that went wrong, including a guard bypassed four ways with the whole suite green.
+
 ## Technical internals
 
 Platform-specific implementation notes for contributors:
