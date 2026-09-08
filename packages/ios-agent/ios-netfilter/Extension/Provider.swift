@@ -553,28 +553,13 @@ private func procArgs(_ pid: pid_t) -> String? {
 
 private let udidCache = UDIDCache()
 
-/// The parent walk, with its failures kept apart from its negative answer.
+// The walk itself is `attributeWalk` in `FlowIdentity.swift`; what stays here is the three reads it
+// climbs through, which are the part a test cannot stand up. Built once — the struct holds closures,
+// so nothing is read until the walk asks.
+private let liveProcesses = ProcessReader(parent: procSysctl,
+                                          executablePath: pidPath,
+                                          arguments: procArgs)
+
 private func attribute(_ pid: pid_t) -> Attribution {
-    var current = pid
-    for _ in 0..<32 {
-        guard let info = procSysctl(current) else {
-            // The process is gone, or the kernel refused. Either way we do not know.
-            return .unresolved("sysctl failed at pid \(current)")
-        }
-        if info.ppid <= 1 {
-            if let path = pidPath(current), !path.hasSuffix("/launchd_sim") {
-                return .host   // a known top-level process that is not a simulator's launchd
-            }
-            // An unreadable path falls through on purpose: the UDID pattern in the arguments is the
-            // stronger check, and losing a flow to a path read would be the wrong trade.
-            if let cached = udidCache.lookup(info.identity) { return .simulator(cached) }
-            guard let udid = procArgs(current).flatMap(extractUDID) else {
-                return .unresolved("no UDID in the arguments of pid \(current)")
-            }
-            udidCache.store(info.identity, udid)
-            return .simulator(udid)
-        }
-        current = info.ppid
-    }
-    return .unresolved("parent chain did not terminate")
+    attributeWalk(pid, reading: liveProcesses, cache: udidCache)
 }

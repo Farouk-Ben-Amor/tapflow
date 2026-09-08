@@ -253,5 +253,21 @@ mutate "pulse: unpublished ignored" 's/unpublished || now - lastWrite/now - last
 # --- where the file goes ---
 mutate "paths: protected path gone" 's|"/Library/Application Support/tapflow",|"/tmp",|'          || fails=1
 
+
+# --- the parent walk: whose traffic a flow is ---
+mutate "walk: a failed read is a host flow" 's/return .unresolved("sysctl failed at pid \\(current)")/return .host/' || fails=1
+mutate "walk: stops only at ppid 1"      's/if info.ppid <= 1 {/if info.ppid == 1 {/'          || fails=1
+mutate "walk: any top is a simulator"    's/!path.hasSuffix("\/launchd_sim")/path.hasSuffix("\/launchd_sim")/' || fails=1
+mutate "walk: an unreadable path is host" 's/if let path = read.executablePath(current), !path.hasSuffix/if read.executablePath(current) == nil { return .host }; if let path = read.executablePath(current), !path.hasSuffix/' || fails=1
+mutate "walk: the cache is not consulted" 's/if let cached = cache.lookup(info.identity) { return .simulator(cached) }//' || fails=1
+mutate "walk: nothing is cached"         's/cache.store(info.identity, udid)//'                || fails=1
+# **The bound itself has no mutation, and that is a limit of this mode rather than an oversight.**
+# Removing it (`while true`) does not make a test fail — it makes the cycle case loop forever, and
+# a `run` that never returns is not a kill, it is the whole suite stopping. The two boundary
+# mutations below cover what the number is; that it exists at all is held by the cycle test, which
+# would hang rather than go red if it did not.
+mutate "walk: one step short"            's/let attributionWalkLimit = 32/let attributionWalkLimit = 31/' || fails=1
+mutate "walk: judges the flow's own process" 's/current = info.ppid//'                         || fails=1
+
 restore
 [[ $fails -eq 0 ]] && echo "=== all mutations killed ===" || { echo "=== a mutation survived ==="; exit 1; }
