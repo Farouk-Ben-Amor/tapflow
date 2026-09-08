@@ -35,6 +35,11 @@
 #import <stdlib.h>
 #import <sys/resource.h>
 #import <sys/socket.h>
+
+// The decidable half, in plain C so a test can compile it with no simulator SDK. See the note at the
+// top of that file for what is in it and why it is a header rather than a `.c`.
+#include "hook-decisions.h"
+
 #import <os/log.h>
 #import <stdatomic.h>
 #import <stdio.h>
@@ -85,12 +90,6 @@ static os_log_t tf_log(void) {
  * **The default is off.** With no target named, or no bundle identifier to compare, this returns
  * false: a bug in the identification leaves the simulator unhooked rather than hooking the system.
  */
-static BOOL tf_is_target_app(void) {
-  const char *target = getenv("TAPFLOW_TARGET_BUNDLE");
-  if (target == NULL || *target == '\0') return NO;
-  NSString *me = NSBundle.mainBundle.bundleIdentifier;
-  return me != nil && [me isEqualToString:@(target)];
-}
 
 /**
  * The simulator this process belongs to, or `NULL`.
@@ -116,10 +115,51 @@ static const char *tf_udid(void) {
  * verdict, the self-check and the watcher below need no second case.
  */
 static BOOL tf_should_activate(void) {
-  // Before anything else: no udid means no per-simulator namespace, and this library has no other.
-  if (tf_udid() == NULL) return NO;
-  return tf_is_target_app();
+  /**
+   * **The two cheap reads come first, and that ordering is the point rather than style.** This runs
+   * in a `constructor` in **every** process the simulator starts — SpringBoard, backboardd, every
+   * daemon — and all but one of them fail here. Reading `NSBundle.mainBundle` parses the main
+   * executable's `Info.plist`, so doing it before the environment is checked would put that cost on
+   * every process on the device for an answer that is `NO`. The first version of this refactor did
+   * exactly that, by making the bundle id an argument.
+   *
+   * The decision function repeats these two guards. That is deliberate: it stays total so a test can
+   * reach every branch, while the ordering that saves the work lives where the work is.
+   */
+  const char *udid = tf_udid();
+  if (udid == NULL) return NO;
+  const char *target = getenv("TAPFLOW_TARGET_BUNDLE");
+  if (target == NULL || *target == '\0') return NO;
+
+  // **The condition path has to fit, and this is the last moment it can be refused.** It is built
+  // from the udid, which arrives from the environment; a truncated one stats a file the agent never
+  // writes, so the device could never be taken offline — and two long udids sharing a prefix would
+  // share a flag. `tf_start_watching` runs after `tf_hook_install`, and the patch cannot be removed,
+  // so checking there would leave irreversible hooks in a process that can never honour them.
+  // `tf_condition_path_decision` reports the length it wanted, which is what makes this checkable.
+  char probe[PATH_MAX];
+  if (tf_condition_path_decision(probe, sizeof probe, udid) >= (int)sizeof probe) return NO;
+  // **Every path derived from the udid, not only the one this function came for.** The verdict's
+  // temporary name is the longest of them, and a udid can fit the condition path while overflowing
+  // it. `tf_write_verdict` refuses a truncated name and returns — correct there, useless here: by
+  // then the hooks are in and cannot be removed, so the process runs hooked while the agent reads
+  // whatever verdict was on disk before. Raised by CodeRabbit on #763, which is also where the
+  // condition path itself came from.
+  if (snprintf(probe, sizeof probe, "/tmp/tapflow-nethook-%s.json.%d.tmp", udid, getpid())
+      >= (int)sizeof probe) return NO;
+
+  NSString *me = NSBundle.mainBundle.bundleIdentifier;
+  const char *bytes = me.UTF8String;
+  // **An embedded NUL would make `strcmp` agree where `NSString` did not.** `CFBundleIdentifier` is
+  // read from a binary plist, which can carry one; `com.x\0z` compares equal to `com.x` byte-wise and
+  // would activate the hooks in an app nobody named. Refused here rather than in the decision, which
+  // takes a C string and cannot see past the terminator.
+  if (bytes != NULL && strlen(bytes) != [me lengthOfBytesUsingEncoding:NSUTF8StringEncoding]) return NO;
+
+  return tf_should_activate_decision(udid, target, bytes) ? YES : NO;
 }
+
+
 
 // ── the condition file ───────────────────────────────────────────────────────
 
@@ -137,7 +177,8 @@ static const char *tf_condition_path(void) {
   dispatch_once(&once, ^{
     // `tf_should_activate` has already refused a process with no udid, so this cannot be NULL by
     // the time anything calls it.
-    snprintf(path, sizeof(path), "/tmp/tapflow-offline-%s", tf_udid());
+    tf_condition_path_decision(path, sizeof(path), tf_udid());
+
   });
   return path;
 }
@@ -173,9 +214,20 @@ static atomic_bool g_forced_offline = ATOMIC_VAR_INIT(false);
 static atomic_bool g_hooks_live = ATOMIC_VAR_INIT(false);
 
 static BOOL tf_blocking(void) {
-  // A partially installed set never blocks anything. See `g_hooks_live`.
-  if (!atomic_load_explicit(&g_hooks_live, memory_order_acquire)) return NO;
-  return atomic_load_explicit(&g_forced_offline, memory_order_relaxed) || tf_offline();
+  // **Both short circuits are preserved here, and they are about cost rather than about the answer.**
+  // `tf_offline()` stats the condition file on every hooked call; the install gate and the forced
+  // flag each existed to not pay for it. Handing all three to the decision as plain arguments would
+  // evaluate the stat unconditionally — including in a process where the install failed and the
+  // replacements are live but neutered, which is the one place it buys nothing at all.
+  //
+  // The orderings stay here too: acquire on the install gate, relaxed on the flag, because they are
+  // a property of these loads rather than of the decision they feed.
+  const int live = atomic_load_explicit(&g_hooks_live, memory_order_acquire);
+  const int forced = live ? atomic_load_explicit(&g_forced_offline, memory_order_relaxed) : 0;
+  const int file = (live && !forced) ? tf_offline() : 0;
+  return tf_blocking_decision(live, forced, file) ? YES : NO;
+
+
 }
 
 // ── the name lookup ──────────────────────────────────────────────────────────
@@ -383,21 +435,9 @@ static void tf_push_path_update(void) {
  * sees the connection go away, which is what a phone losing signal looks like.
  */
 static BOOL tf_peer_is_loopback(const struct sockaddr *addr) {
-  if (addr->sa_family == AF_INET) {
-    const struct sockaddr_in *v4 = (const struct sockaddr_in *)addr;
-    return (ntohl(v4->sin_addr.s_addr) >> 24) == 127;
-  }
-  if (addr->sa_family == AF_INET6) {
-    const struct sockaddr_in6 *v6 = (const struct sockaddr_in6 *)addr;
-    if (IN6_IS_ADDR_LOOPBACK(&v6->sin6_addr)) return YES;
-    // ::ffff:127.0.0.0/8 — a v4 loopback reached through a v6 socket, which is what a dual-stack
-    // resolver hands back for `localhost` here.
-    if (IN6_IS_ADDR_V4MAPPED(&v6->sin6_addr)) {
-      return (ntohl(*(const uint32_t *)&v6->sin6_addr.s6_addr[12]) >> 24) == 127;
-    }
-  }
-  return NO;
+  return tf_peer_is_loopback_decision(addr) ? YES : NO;
 }
+
 
 /**
  * The descriptors are walked with plain POSIX rather than `libproc`, which the simulator SDK does not
