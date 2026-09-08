@@ -9,5 +9,5 @@ loopback and therefore must survive a cut, whether a call is refused, whether th
 to hook, and where the offline flag lives. Plain C with no Foundation, so a test compiles it with a
 bare `cc` and no simulator SDK — the tests run in the ordinary suite rather than on a macOS runner.
 
-34 cases and 20 mutations. The condition-file path now has a guard comparing the C literal against
+36 cases and 21 mutations. The condition-file path now has a guard comparing the C literal against
 the TypeScript that writes it; nothing compiled both before.

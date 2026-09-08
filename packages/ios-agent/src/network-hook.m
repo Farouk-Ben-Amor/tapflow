@@ -131,6 +131,15 @@ static BOOL tf_should_activate(void) {
   const char *target = getenv("TAPFLOW_TARGET_BUNDLE");
   if (target == NULL || *target == '\0') return NO;
 
+  // **The condition path has to fit, and this is the last moment it can be refused.** It is built
+  // from the udid, which arrives from the environment; a truncated one stats a file the agent never
+  // writes, so the device could never be taken offline — and two long udids sharing a prefix would
+  // share a flag. `tf_start_watching` runs after `tf_hook_install`, and the patch cannot be removed,
+  // so checking there would leave irreversible hooks in a process that can never honour them.
+  // `tf_condition_path_decision` reports the length it wanted, which is what makes this checkable.
+  char probe[PATH_MAX];
+  if (tf_condition_path_decision(probe, sizeof probe, udid) >= (int)sizeof probe) return NO;
+
   NSString *me = NSBundle.mainBundle.bundleIdentifier;
   const char *bytes = me.UTF8String;
   // **An embedded NUL would make `strcmp` agree where `NSString` did not.** `CFBundleIdentifier` is

@@ -54,8 +54,13 @@ mutate () {   # $1 = label, $2 = sed program
     echo "  SURVIVED: $1   <-- it compiled and every test still passed; one of them is decoration"
     return 1
   fi
-  if ! grep -q "Tests " "$WORK/log"; then
-    echo "  BUILD BROKE: $1   <-- the harness did not compile, so nothing judged it"
+  # **`Tests ` alone is not the discriminator, which was measured the hard way.** When `cc` fails in
+  # `beforeAll`, vitest still prints a summary — `Tests  36 skipped (36)` — so a mutation that never
+  # compiled matched the old check and was reported as `killed`. That is precisely the failure the
+  # note above says this mode exists to prevent. A mutation a test actually killed reports
+  # `N failed`; a skipped suite never does.
+  if ! grep -qE "Tests +[0-9]+ failed" "$WORK/log"; then
+    echo "  BUILD BROKE: $1   <-- the harness did not compile or the suite skipped, so nothing judged it"
     return 1
   fi
   echo "  killed:   $1"
@@ -76,14 +81,19 @@ mutate "loop: v4 family ignored"    's|if (addr->sa_family == AF_INET) {|if (1) 
 # zeroed body answers 0 with or without the guard. The payload cases are what made it observable.
 mutate "loop: v6 family ignored"    's|if (addr->sa_family == AF_INET6) {|if (1) {|'           || fails=1
 
+# **These keep every parameter used, and that is not style.** The harness compiles with
+# `-Wall -Wextra -Werror`, so a mutation that deletes a parameter's only use fails on
+# `-Wunused-parameter` — and until the discriminator was corrected, five of them were reported as
+# `killed` on the strength of a compile error. Flipping an answer or neutering a term with `&& 0`
+# keeps the parameter live, so what the mutation moves is the decision rather than the build.
 # tf_blocking_decision — the install gate is the one that outranks everything
-mutate "block: partial install blocks" 's|if (!hooksLive) return 0;||'                         || fails=1
-mutate "block: the file is ignored"    's|return forced \|\| conditionFilePresent;|return forced;|' || fails=1
-mutate "block: the flag is ignored"    's|return forced \|\| conditionFilePresent;|return conditionFilePresent;|' || fails=1
+mutate "block: a partial install blocks" 's|if (!hooksLive) return 0;|if (!hooksLive) return 1;|' || fails=1
+mutate "block: the file is ignored"     's|return forced \|\| conditionFilePresent;|return forced \|\| (conditionFilePresent \&\& 0);|' || fails=1
+mutate "block: the flag is ignored"     's|return forced \|\| conditionFilePresent;|return (forced \&\& 0) \|\| conditionFilePresent;|' || fails=1
 mutate "block: both required"          's|return forced \|\| conditionFilePresent;|return forced \&\& conditionFilePresent;|' || fails=1
 
 # tf_should_activate_decision — every other process in the simulator stops here
-mutate "act: no udid needed"        's|^  if (udid == NULL.*$||'                            || fails=1
+mutate "act: a missing udid activates"  's|^  if (udid == NULL.*return 0;$|  if (udid == NULL \|\| *udid == 0) return 1;|' || fails=1
 mutate "act: blank udid counts"     's|udid == NULL \|\| \*udid == |udid == NULL \&\& *udid == |' || fails=1
 # **Flipped rather than deleted, and the difference is a finding.** Deleting this guard survives:
 # an empty target reaches `strcmp` and never matches a real bundle id, so the outcome is identical,
@@ -98,6 +108,6 @@ mutate "act: nil bundle accepted"   's|if (myBundleId == NULL) return 0;||'     
 # tf_condition_path_decision — a contract with the agent, in another language
 mutate "path: the prefix moves"     's|/tmp/tapflow-offline-|/tmp/tapflow-off-|'               || fails=1
 mutate "path: the directory moves"  's|/tmp/tapflow-offline-|/var/tmp/tapflow-offline-|'       || fails=1
-mutate "path: the udid is dropped"  's|"/tmp/tapflow-offline-%s", udid|"/tmp/tapflow-offline"|' || fails=1
+mutate "path: the udid is dropped"      's|"/tmp/tapflow-offline-%s", udid|"/tmp/tapflow-offline-%.0s", udid|' || fails=1
 
 [[ $fails -eq 0 ]] && echo "=== all mutations killed ===" || { echo "=== a mutation survived ==="; exit 1; }

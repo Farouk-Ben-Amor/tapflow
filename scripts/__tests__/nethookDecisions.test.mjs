@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -32,15 +32,23 @@ const HARNESS = path.join(REPO, 'scripts/__tests__/fixtures/nethook-decisions.c'
  * failure names a case rather than an exit code.
  */
 let bin
+let workDir
 
 beforeAll(() => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nethook-decisions-'))
-  bin = path.join(dir, 'harness')
+  workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nethook-decisions-'))
+  bin = path.join(workDir, 'harness')
   // **A compiler that is missing is a failure, not a skip.** A skipped suite reads as a passing one
   // in a summary, and this is the only thing that judges these decisions at all.
   execFileSync('cc', ['-O2', '-Wall', '-Wextra', '-Werror', '-I', HEADER_DIR, '-o', bin, HARNESS], {
     stdio: 'pipe',
   })
+})
+
+// **`mutate-nethook.sh` runs this suite twenty-three times per invocation**, so a directory left
+// behind is not one directory. Measured before adding this: 133 of them under `os.tmpdir()`.
+// `afterAll` runs even when `beforeAll` threw, which is the case that leaves the compiler's output.
+afterAll(() => {
+  if (workDir) fs.rmSync(workDir, { recursive: true, force: true })
 })
 
 const ask = (...args) => execFileSync(bin, args.map(String), { encoding: 'utf8' }).trim()
