@@ -57,6 +57,12 @@ describe('SimulatorInfoCard — the shared status region beside the device (#748
     // out of `getStatusText` and into a constant render) must also fail this test, because the
     // second assertion checks that the sentence is not present when `decoderUnsupported: false`.
     // Verified by deleting the conditional and watching both the type and the textContent change.
+    //
+    // **Mutation:** a wrapper that is conditionally remounted or given a state-dependent `key`
+    // (the antipattern that drops the first live-region announcement by remounting the region
+    // together with its first sentence) must also fail this test, because the rerender asserts
+    // identity — the same DOM node must host both the empty and the populated state. Verified by
+    // giving the wrapper `key={statusText ?? 'empty'}` and watching the identity assertion go red.
     const { rerender } = render(<SimulatorInfoCard {...healthy()} />)
 
     const regionBefore = screen.getByRole('status')
@@ -64,11 +70,12 @@ describe('SimulatorInfoCard — the shared status region beside the device (#748
     expect(regionBefore.textContent).toBe('')
     expect(screen.queryByText(/streaming is not supported/i)).toBeNull()
 
-    // Same node after a rerender — proves the region survives, not just that it is mounted once.
-    rerender(<SimulatorInfoCard {...healthy({ decoderUnsupported: false })} />)
+    // Same node after a rerender that *changes* the state — proves the region survives both an
+    // empty and a populated transition, not just two identical rerenders.
+    rerender(<SimulatorInfoCard {...healthy({ decoderUnsupported: true })} />)
     const regionAfter = screen.getByRole('status')
-    expect(regionAfter).toBe(regionBefore)
-    expect(regionAfter.textContent).toBe('')
+    expect(regionAfter, 'the wrapper remounted instead of taking new content').toBe(regionBefore)
+    expect(regionAfter.textContent).toBe('Streaming is not supported in this environment.')
   })
 
   it('lets higher-priority states win over the decoder-unsupported sentence', () => {
